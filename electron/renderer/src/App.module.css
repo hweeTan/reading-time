@@ -1,0 +1,40 @@
+.synthesizeView {
+  display: none;
+  flex: 1;
+  min-height: 0;
+}
+
+.synthesizeActive {
+  composes: synthesizeView;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+}
+
+.settingsView {
+  display: none;
+  flex: 1;
+  min-height: 0;
+}
+
+.settingsActive {
+  composes: settingsView;
+  display: block;
+  padding: 1rem 1.25rem;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}

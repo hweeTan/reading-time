@@ -1,0 +1,40 @@
+:root {
+  --bg: #0f1114;
+  --panel: #1a1d23;
+  --border: #2a3038;
+  --text: #e8eaed;
+  --muted: #9aa3af;
+  --accent: #5b8def;
+  --accent-hover: #7aa3f5;
+  --success: #3dd68c;
+  --warn: #f5c542;
+  --error: #f87171;
+  --radius: 10px;
+  font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+body.appLocked header,
+body.appLocked main,
+body.appLocked .playerBar {
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+body.appLocked .footerStatus {
+  opacity: 1;
+  pointer-events: auto;
+}

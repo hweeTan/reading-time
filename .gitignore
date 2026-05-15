@@ -10,3 +10,4 @@ output.wav
 .env
 .DS_Store
 node_modules/
+electron/renderer/dist/

@@ -5,11 +5,17 @@
   "author": "HweeTan",
   "main": "main.cjs",
   "scripts": {
-    "start": "electron .",
-    "dev": "electron . --enable-logging",
+    "dev:vite": "vite --config renderer/vite.config.ts",
+    "dev:electron": "wait-on http://127.0.0.1:5173 && ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .",
+    "dev:electron:debug": "wait-on http://127.0.0.1:5173 && ELECTRON_RENDERER_URL=http://127.0.0.1:5173 ELECTRON_OPEN_DEVTOOLS=1 electron .",
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:debug": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron:debug\"",
+    "dev:setup": "npm run prepare-bundle && npm run dev",
+    "build:renderer": "vite build --config renderer/vite.config.ts",
+    "start": "npm run build:renderer && electron .",
     "prepare-bundle": "bash ../scripts/prepare-bundle.sh",
-    "pack": "npm run prepare-bundle && electron-builder --dir",
-    "dist": "npm run prepare-bundle && electron-builder"
+    "pack": "npm run build:renderer && npm run prepare-bundle && electron-builder --dir",
+    "dist": "npm run build:renderer && npm run prepare-bundle && electron-builder"
   },
   "build": {
     "appId": "com.hweetan.readingtime",
@@ -20,31 +26,24 @@
     "files": [
       "main.cjs",
       "preload.cjs",
-      "renderer/**/*"
+      "renderer/dist/**/*"
     ],
     "asar": true,
     "extraResources": [
       {
         "from": "../bundle/python",
         "to": "python",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       },
       {
         "from": "../bundle/tts",
         "to": "tts",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       }
     ],
     "mac": {
       "category": "public.app-category.productivity",
-      "target": [
-        "dmg",
-        "zip"
-      ],
+      "target": ["dmg", "zip"],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
@@ -54,8 +53,19 @@
       "title": "ReadingTime ${version}"
     }
   },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
   "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
     "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "wait-on": "^8.0.3"
   }
 }

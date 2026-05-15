@@ -8,6 +8,7 @@ let mainWindow = null;
 let pythonProc = null;
 let reqCounter = 0;
 const pending = new Map();
+let workerStderr = "";
 
 function isPackagedApp() {
   return app.isPackaged;
@@ -19,6 +20,18 @@ function ttsRoot() {
     : path.resolve(__dirname, "..");
 }
 
+function devBundlePythonHome() {
+  return path.join(__dirname, "..", "bundle", "python");
+}
+
+function devBundlePythonExecutable() {
+  const home = devBundlePythonHome();
+  if (process.platform === "win32") {
+    return path.join(home, "Scripts", "python.exe");
+  }
+  return path.join(home, "bin", "python3");
+}
+
 function pythonExecutable() {
   if (process.env.TTS_PYTHON) return process.env.TTS_PYTHON;
   if (isPackagedApp()) {
@@ -27,6 +40,8 @@ function pythonExecutable() {
     }
     return path.join(process.resourcesPath, "python", "bin", "python3");
   }
+  const devBundlePy = devBundlePythonExecutable();
+  if (fs.existsSync(devBundlePy)) return devBundlePy;
   return "python3";
 }
 
@@ -42,8 +57,10 @@ function workerEnv() {
   };
   delete env.HF_HUB_OFFLINE;
   delete env.TRANSFORMERS_OFFLINE;
-  if (isPackagedApp()) {
-    const pyHome = path.join(process.resourcesPath, "python");
+  const pyHome = isPackagedApp()
+    ? path.join(process.resourcesPath, "python")
+    : devBundlePythonHome();
+  if (fs.existsSync(pyHome)) {
     env.VIRTUAL_ENV = pyHome;
     const binDir =
       process.platform === "win32"
@@ -56,23 +73,32 @@ function workerEnv() {
 
 function assertWorkerRuntime() {
   const py = pythonExecutable();
-  if (!isPackagedApp()) return;
-  if (!fs.existsSync(py)) {
+  const script = path.join(ttsRoot(), "tts_worker.py");
+  if (!fs.existsSync(script)) {
+    throw new Error(`Worker script not found at ${script}`);
+  }
+  if (isPackagedApp() && !fs.existsSync(py)) {
     throw new Error(
       `Bundled Python not found at ${py}. Run: npm run prepare-bundle (from electron/)`
     );
   }
-  const script = path.join(ttsRoot(), "tts_worker.py");
-  if (!fs.existsSync(script)) {
-    throw new Error(`Worker script not found at ${script}`);
+  if (!isPackagedApp() && !fs.existsSync(devBundlePythonExecutable())) {
+    console.warn(
+      `[ReadingTime] Dev bundle Python not found. Using "${py}" from PATH.\n` +
+        `  If the worker fails, run: cd electron && npm run prepare-bundle\n` +
+        `  Or set TTS_PYTHON to your venv python.`
+    );
   }
 }
 
 function startPythonWorker() {
   assertWorkerRuntime();
+  workerStderr = "";
   const root = ttsRoot();
   const script = path.join(root, "tts_worker.py");
-  pythonProc = spawn(pythonExecutable(), [script], {
+  const py = pythonExecutable();
+  console.log(`[ReadingTime] Starting worker: ${py} ${script}`);
+  pythonProc = spawn(py, [script], {
     cwd: root,
     env: workerEnv(),
     stdio: ["pipe", "pipe", "pipe"],
@@ -102,15 +128,62 @@ function startPythonWorker() {
   });
 
   pythonProc.stderr.on("data", (d) => {
-    console.error("[tts_worker]", d.toString());
+    const chunk = d.toString();
+    workerStderr = (workerStderr + chunk).slice(-8000);
+    console.error("[tts_worker]", chunk);
   });
 
   pythonProc.on("exit", (code) => {
     console.error("Python worker exited:", code);
+    if (workerStderr.trim()) {
+      console.error("[tts_worker] last stderr:\n", workerStderr.trim());
+    }
     for (const [, { reject }] of pending) {
       reject(new Error("Python worker stopped"));
     }
     pending.clear();
+  });
+}
+
+function waitForWorkerReady(maxMs = 180_000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + maxMs;
+
+    const attempt = () => {
+      if (!pythonProc) {
+        reject(new Error("Python worker not started"));
+        return;
+      }
+      if (pythonProc.exitCode != null) {
+        const hint = workerStderr.trim()
+          ? `\n\n${workerStderr.trim()}`
+          : "";
+        reject(
+          new Error(
+            `Python worker exited during startup (code ${pythonProc.exitCode}).` +
+              hint +
+              "\n\nTry: cd electron && npm run prepare-bundle"
+          )
+        );
+        return;
+      }
+
+      rpc("ping")
+        .then(() => resolve())
+        .catch(() => {
+          if (Date.now() >= deadline) {
+            reject(
+              new Error(
+                "Python worker did not respond in time (still loading models?)."
+              )
+            );
+            return;
+          }
+          setTimeout(attempt, 400);
+        });
+    };
+
+    setTimeout(attempt, 300);
   });
 }
 
@@ -157,21 +230,35 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Preload + ipcRenderer must work when loading the Vite dev server URL.
+      sandbox: false,
     },
   });
 
-  mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+  const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+  if (rendererUrl) {
+    mainWindow.loadURL(rendererUrl);
+    // Opt-in only — auto-opening DevTools spams harmless Autofill CDP errors in Electron.
+    if (process.env.ELECTRON_OPEN_DEVTOOLS === "1") {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
+  } else {
+    mainWindow.loadFile(
+      path.join(__dirname, "renderer", "dist", "index.html")
+    );
+  }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   try {
     startPythonWorker();
+    await waitForWorkerReady();
     createWindow();
   } catch (err) {
     console.error(err);
     dialog.showErrorBox(
       "ReadingTime",
-      `${err.message}\n\nDevelopment: run from electron/ with npm start.\nBuild: npm run dist (prepares Python bundle first).`
+      `${err.message}\n\nDevelopment: cd electron && npm run prepare-bundle\nThen: npm run dev`
     );
     app.quit();
   }

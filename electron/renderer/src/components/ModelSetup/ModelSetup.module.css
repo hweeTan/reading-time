@@ -1,0 +1,54 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(8, 10, 12, 0.88);
+  backdrop-filter: blur(6px);
+}
+
+.card {
+  width: min(480px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.35rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.card h2 {
+  margin: 0 0 0.65rem;
+  font-size: 1.1rem;
+}
+
+.progressSection {
+  margin: 1rem 0 0.5rem;
+}
+
+.progressTrack {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.45rem;
+}
+
+.progressBar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.error {
+  color: var(--error);
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+
+.actions {
+  margin-top: 1rem;
+}

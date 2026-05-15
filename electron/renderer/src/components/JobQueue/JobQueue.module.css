@@ -1,0 +1,88 @@
+.panel {
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+.panelHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.panelHead h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.jobList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.jobItem {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.title {
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.jobProgress {
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.jobProgressBar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.statusDone .jobProgressBar {
+  background: var(--success);
+}
+
+.statusError {
+  border-color: #5c3030;
+}
+
+.statusError .jobProgressBar {
+  background: var(--error);
+}
+
+.jobError {
+  color: var(--error);
+  font-size: 0.8rem;
+  margin-bottom: 0.35rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jobActions {
+  margin-top: 0.4rem;
+}
+
+.hidden {
+  display: none;
+}

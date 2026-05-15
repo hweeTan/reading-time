@@ -1,0 +1,46 @@
+.panelInput {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.panelVoice {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.dropZone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropZoneDragover {
+  composes: dropZone;
+  border-color: var(--accent);
+  background: rgba(91, 141, 239, 0.08);
+}
+
+.voiceRow {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.voiceRow select {
+  flex: 1;
+  min-width: 0;
+}
+
+.previewBtn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  min-width: 8.75rem;
+  text-align: center;
+}
