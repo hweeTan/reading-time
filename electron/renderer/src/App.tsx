@@ -105,14 +105,14 @@ export default function App() {
       if (stream?.status === "running") {
         ttsApi
           .setJobSynthConfig(stream.id, vId, emo)
-          .catch(() => {});
+          .catch(() => { });
         return;
       }
       const runningJob = jobs.find((j) => j.status === "running");
       if (runningJob) {
         ttsApi
           .setJobSynthConfig(runningJob.id, vId, emo)
-          .catch(() => {});
+          .catch(() => { });
       }
     },
     [jobs]
@@ -276,7 +276,7 @@ export default function App() {
 
       ttsApi
         .setJobPlayback(streamJob.id, isPlaying, chunk)
-        .catch(() => {});
+        .catch(() => { });
     },
     []
   );
@@ -300,7 +300,7 @@ export default function App() {
     const player = playerRef.current;
     if (streamJob?.status === "running" && player) {
       syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
-      ttsApi.cancelJob(streamJob.id).catch(() => {});
+      ttsApi.cancelJob(streamJob.id).catch(() => { });
       player.endSession(streamJob.id, { reason: "cancelled" });
     } else if (player?.session) {
       player.reset();
@@ -313,7 +313,7 @@ export default function App() {
   const isStreamActive = useCallback(() => {
     return Boolean(
       streamJobRef.current?.status === "running" ||
-        playerRef.current?.session?.jobRunning
+      playerRef.current?.session?.jobRunning
     );
   }, []);
 
@@ -333,7 +333,7 @@ export default function App() {
       const streamJob = streamJobRef.current;
       if (streamJob?.status === "running") {
         syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
-        ttsApi.cancelJob(streamJob.id).catch(() => {});
+        ttsApi.cancelJob(streamJob.id).catch(() => { });
         player.endSession(streamJob.id, { reason: "cancelled" });
       } else if (player.session) {
         player.reset();
@@ -426,7 +426,7 @@ export default function App() {
             : j
         )
       );
-      ttsApi.cancelJob(jobId).catch(() => {});
+      ttsApi.cancelJob(jobId).catch(() => { });
       setStatus(`Error: ${message}`, true);
     },
     [setStatus]
@@ -913,7 +913,7 @@ export default function App() {
             <JobQueue
               jobs={jobs}
               onCancel={(jobId) => {
-                ttsApi.cancelJob(jobId).catch(() => {});
+                ttsApi.cancelJob(jobId).catch(() => { });
                 setJobs((prev) => {
                   const job = prev.find((j) => j.id === jobId);
                   if (job) setStatus(`Cancelled: ${job.title}`);

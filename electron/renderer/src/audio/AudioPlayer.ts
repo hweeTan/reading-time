@@ -1,32 +1,32 @@
 export interface PlayerUi {
-  btnPlay: HTMLButtonElement;
-  seek: HTMLInputElement;
-  timeLabel: HTMLElement;
-  chunksLabel: HTMLElement;
-  btnMute: HTMLButtonElement;
-  muteIcon: SVGPathElement | null;
-  muteLabel: HTMLElement | null;
+  btnPlay: HTMLButtonElement
+  seek: HTMLInputElement
+  timeLabel: HTMLElement
+  chunksLabel: HTMLElement
+  btnMute: HTMLButtonElement
+  muteIcon: SVGPathElement | null
+  muteLabel: HTMLElement | null
 }
 
-type PlayerState = "idle" | "playing" | "paused" | "buffering" | "ended";
+type PlayerState = 'idle' | 'playing' | 'paused' | 'buffering' | 'ended'
 
 interface ChunkEntry {
-  index: number;
-  buffer: AudioBuffer;
-  startSec: number;
-  durationSec: number;
+  index: number
+  buffer: AudioBuffer
+  startSec: number
+  durationSec: number
 }
 
 interface Session {
-  jobId: string;
-  title: string;
-  mode: "streaming" | "file";
-  jobRunning: boolean;
-  autoPlayOnChunk: boolean;
-  wantsPlay: boolean;
-  chunks: ChunkEntry[];
-  totalChunks: number;
-  sampleRate: number;
+  jobId: string
+  title: string
+  mode: 'streaming' | 'file'
+  jobRunning: boolean
+  autoPlayOnChunk: boolean
+  wantsPlay: boolean
+  chunks: ChunkEntry[]
+  totalChunks: number
+  sampleRate: number
 }
 
 /**
@@ -34,806 +34,798 @@ interface Session {
  */
 export class AudioPlayer {
   static readonly MUTE_ICON =
-    "M16.5 12a4.5 4.5 0 0 0-1.9-3.7l1.4-1.4A6.5 6.5 0 0 1 18.5 12c0 1.8-.7 3.4-1.9 4.6l-1.4-1.4A4.5 4.5 0 0 0 16.5 12ZM3 9v6h4l5 5V4L7 9H3zm14.3 2.3 1.4 1.4L22.4 9l-3.7-3.7-1.4 1.4L19.6 9l-2.3 2.3z";
+    'M16.5 12a4.5 4.5 0 0 0-1.9-3.7l1.4-1.4A6.5 6.5 0 0 1 18.5 12c0 1.8-.7 3.4-1.9 4.6l-1.4-1.4A4.5 4.5 0 0 0 16.5 12ZM3 9v6h4l5 5V4L7 9H3zm14.3 2.3 1.4 1.4L22.4 9l-3.7-3.7-1.4 1.4L19.6 9l-2.3 2.3z'
   static readonly UNMUTE_ICON =
-    "M3 9v6h4l5 5V4L7 9H3zm7.5 3.5c0-1.77 1.02-3.29 2.5-4.03v8.05a4.48 4.48 0 0 1-2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z";
+    'M3 9v6h4l5 5V4L7 9H3zm7.5 3.5c0-1.77 1.02-3.29 2.5-4.03v8.05a4.48 4.48 0 0 1-2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'
 
-  private ui: PlayerUi;
-  private ctx: AudioContext | null = null;
-  private masterGain: GainNode | null = null;
-  private sessionGain: GainNode | null = null;
-  session: Session | null = null;
-  private scheduledSources: AudioBufferSourceNode[] = [];
-  private previewSource: AudioBufferSourceNode | null = null;
-  isMuted = true;
-  state: PlayerState = "idle";
-  private readonly BUFFER_EDGE_SEC = 0.05;
-  playheadSec = 0;
-  knownDurationSec = 0;
-  totalDurationSec = 0;
-  private isScrubbing = false;
-  private rafId = 0;
+  private ui: PlayerUi
+  private ctx: AudioContext | null = null
+  private masterGain: GainNode | null = null
+  private sessionGain: GainNode | null = null
+  session: Session | null = null
+  private scheduledSources: AudioBufferSourceNode[] = []
+  private previewSource: AudioBufferSourceNode | null = null
+  isMuted = true
+  state: PlayerState = 'idle'
+  private readonly BUFFER_EDGE_SEC = 0.05
+  playheadSec = 0
+  knownDurationSec = 0
+  totalDurationSec = 0
+  private isScrubbing = false
+  private rafId = 0
   private _playbackAnchor: { playheadSec: number; ctxTime: number } | null =
-    null;
-  private _scheduleTimelineSec: number | null = null;
-  private _scheduleCtxTime: number | null = null;
-  private anchorCtxTime: number | null = null;
-  private anchorPlayhead = 0;
-  private _lastNotifiedChunk = 0;
+    null
+  private _scheduleTimelineSec: number | null = null
+  private _scheduleCtxTime: number | null = null
+  private anchorCtxTime: number | null = null
+  private anchorPlayhead = 0
+  private _lastNotifiedChunk = 0
 
-  onStateChange: ((state: PlayerState) => void) | null = null;
-  onPlayRequest: (() => boolean) | null = null;
+  onStateChange: ((state: PlayerState) => void) | null = null
+  onPlayRequest: (() => boolean) | null = null
   onPlaybackControl:
-    | ((opts: {
-        playing: boolean;
-        playbackChunkIndex: number;
-      }) => void)
-    | null = null;
+    | ((opts: { playing: boolean; playbackChunkIndex: number }) => void)
+    | null = null
 
   constructor(ui: PlayerUi) {
-    this.ui = ui;
+    this.ui = ui
 
-    ui.btnPlay.addEventListener("click", () => {
-      if (this.onPlayRequest?.()) return;
-      this.togglePlay();
-    });
-    ui.btnMute.addEventListener("click", () => this.setMuted(!this.isMuted));
-    ui.seek.addEventListener("input", () => {
-      this.isScrubbing = true;
-      this.seek(parseFloat(ui.seek.value) || 0);
-    });
-    ui.seek.addEventListener("change", () => {
-      this.isScrubbing = false;
-    });
+    ui.btnPlay.addEventListener('click', () => {
+      if (this.onPlayRequest?.()) return
+      this.togglePlay()
+    })
+    ui.btnMute.addEventListener('click', () => this.setMuted(!this.isMuted))
+    ui.seek.addEventListener('input', () => {
+      this.isScrubbing = true
+      this.seek(parseFloat(ui.seek.value) || 0)
+    })
+    ui.seek.addEventListener('change', () => {
+      this.isScrubbing = false
+    })
   }
 
   private ensureContext(): AudioContext {
     if (!this.ctx) {
-      this.ctx = new AudioContext();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.connect(this.ctx.destination);
-      this.sessionGain = this.ctx.createGain();
-      this.sessionGain.connect(this.masterGain);
-      this.applyMuteGain();
+      this.ctx = new AudioContext()
+      this.masterGain = this.ctx.createGain()
+      this.masterGain.connect(this.ctx.destination)
+      this.sessionGain = this.ctx.createGain()
+      this.sessionGain.connect(this.masterGain)
+      this.applyMuteGain()
     }
-    return this.ctx;
+    return this.ctx
   }
 
   private async resumeContext(): Promise<AudioContext> {
-    const ctx = this.ensureContext();
-    if (ctx.state === "suspended") await ctx.resume();
-    return ctx;
+    const ctx = this.ensureContext()
+    if (ctx.state === 'suspended') await ctx.resume()
+    return ctx
   }
 
   private applyMuteGain() {
     if (this.masterGain) {
-      this.masterGain.gain.value = this.isMuted ? 0 : 1;
+      this.masterGain.gain.value = this.isMuted ? 0 : 1
     }
   }
 
   setMuted(muted: boolean) {
-    this.isMuted = muted;
-    this.applyMuteGain();
-    this.updateMuteUi();
-    localStorage.setItem("livePlaybackMuted", muted ? "1" : "0");
+    this.isMuted = muted
+    this.applyMuteGain()
+    this.updateMuteUi()
+    localStorage.setItem('livePlaybackMuted', muted ? '1' : '0')
   }
 
   setInitialMuted(muted: boolean) {
-    this.isMuted = muted;
-    this.applyMuteGain();
-    this.updateMuteUi();
+    this.isMuted = muted
+    this.applyMuteGain()
+    this.updateMuteUi()
   }
 
   private updateMuteUi() {
-    const { btnMute, muteIcon, muteLabel } = this.ui;
-    btnMute.classList.toggle("is-muted", this.isMuted);
-    btnMute.setAttribute("aria-pressed", String(this.isMuted));
+    const { btnMute, muteIcon, muteLabel } = this.ui
+    btnMute.classList.toggle('is-muted', this.isMuted)
+    btnMute.setAttribute('aria-pressed', String(this.isMuted))
     btnMute.title = this.isMuted
-      ? "Muted — click to unmute"
-      : "Sound on — click to mute";
-    if (muteLabel) muteLabel.textContent = this.isMuted ? "Muted" : "Sound on";
+      ? 'Muted — click to unmute'
+      : 'Sound on — click to mute'
+    if (muteLabel) muteLabel.textContent = this.isMuted ? 'Muted' : 'Sound on'
     if (muteIcon) {
       muteIcon.setAttribute(
-        "d",
-        this.isMuted ? AudioPlayer.MUTE_ICON : AudioPlayer.UNMUTE_ICON
-      );
+        'd',
+        this.isMuted ? AudioPlayer.MUTE_ICON : AudioPlayer.UNMUTE_ICON,
+      )
     }
   }
 
   private formatTime(sec: number): string {
-    if (!Number.isFinite(sec) || sec < 0) sec = 0;
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${String(s).padStart(2, "0")}`;
+    if (!Number.isFinite(sec) || sec < 0) sec = 0
+    const m = Math.floor(sec / 60)
+    const s = Math.floor(sec % 60)
+    return `${m}:${String(s).padStart(2, '0')}`
   }
 
   private getBufferedEndSec(): number {
-    return this.knownDurationSec;
+    return this.knownDurationSec
   }
 
   private isStreamingSession(): boolean {
-    return this.session?.mode === "streaming" && this.session.jobRunning;
+    return this.session?.mode === 'streaming' && this.session.jobRunning
   }
 
   private getStreamingPlayheadCap(): number {
-    return Math.max(0, this.getBufferedEndSec() - 0.001);
+    return Math.max(0, this.getBufferedEndSec() - 0.001)
   }
 
   private getClockPlayheadSec(): number {
-    if (this.state !== "playing" || !this.ctx) {
-      return this.playheadSec;
+    if (this.state !== 'playing' || !this.ctx) {
+      return this.playheadSec
     }
     if (this.isStreamingSession() && this._playbackAnchor) {
-      const elapsed = this.ctx.currentTime - this._playbackAnchor.ctxTime;
-      return (
-        this._playbackAnchor.playheadSec + Math.max(0, elapsed)
-      );
+      const elapsed = this.ctx.currentTime - this._playbackAnchor.ctxTime
+      return this._playbackAnchor.playheadSec + Math.max(0, elapsed)
     }
     if (this.anchorCtxTime != null) {
-      return (
-        this.anchorPlayhead + (this.ctx.currentTime - this.anchorCtxTime)
-      );
+      return this.anchorPlayhead + (this.ctx.currentTime - this.anchorCtxTime)
     }
-    return this.playheadSec;
+    return this.playheadSec
   }
 
   getPlayheadSec(): number {
-    let ph = this.getClockPlayheadSec();
-    if (this.state === "playing" && this.isStreamingSession()) {
-      const cap = this.getStreamingPlayheadCap();
-      if (ph > cap) ph = cap;
+    let ph = this.getClockPlayheadSec()
+    if (this.state === 'playing' && this.isStreamingSession()) {
+      const cap = this.getStreamingPlayheadCap()
+      if (ph > cap) ph = cap
     }
-    return ph;
+    return ph
   }
 
   private setPlaybackAnchor(playheadSec: number) {
-    if (!this.ctx) return;
-    const bufEnd = this.getBufferedEndSec();
+    if (!this.ctx) return
+    const bufEnd = this.getBufferedEndSec()
     const ph =
       bufEnd > 0
         ? Math.max(0, Math.min(playheadSec, bufEnd - 0.001))
-        : Math.max(0, playheadSec);
-    this.playheadSec = ph;
-    this.anchorPlayhead = ph;
-    this.anchorCtxTime = this.ctx.currentTime;
-    this._playbackAnchor = { playheadSec: ph, ctxTime: this.ctx.currentTime };
+        : Math.max(0, playheadSec)
+    this.playheadSec = ph
+    this.anchorPlayhead = ph
+    this.anchorCtxTime = this.ctx.currentTime
+    this._playbackAnchor = { playheadSec: ph, ctxTime: this.ctx.currentTime }
   }
 
   private clearPlaybackAnchor() {
-    this._playbackAnchor = null;
-    this.anchorCtxTime = null;
+    this._playbackAnchor = null
+    this.anchorCtxTime = null
   }
 
   private clearSchedulePipeline() {
-    this._scheduleTimelineSec = null;
-    this._scheduleCtxTime = null;
+    this._scheduleTimelineSec = null
+    this._scheduleCtxTime = null
   }
 
   private getAudioPlayheadSec(): number {
     if (
       this._scheduleTimelineSec != null &&
-      this.state === "playing" &&
+      this.state === 'playing' &&
       this.scheduledSources.length > 0
     ) {
-      const clockPh = this.getClockPlayheadSec();
+      const clockPh = this.getClockPlayheadSec()
       if (clockPh > this._scheduleTimelineSec + 0.15) {
-        return this._scheduleTimelineSec;
+        return this._scheduleTimelineSec
       }
     }
-    return this.getPlayheadSec();
+    return this.getPlayheadSec()
   }
 
   private checkStreamBufferUnderrun() {
-    if (this.state !== "playing") return;
-    if (!this.isStreamingSession()) return;
+    if (this.state !== 'playing') return
+    if (!this.isStreamingSession()) return
 
-    const bufEnd = this.getBufferedEndSec();
+    const bufEnd = this.getBufferedEndSec()
     if (bufEnd <= 0) {
-      this.enterBufferWait();
-      return;
+      this.enterBufferWait()
+      return
     }
 
-    const ph = this.getPlayheadSec();
+    const ph = this.getPlayheadSec()
     if (this.scheduledSources.length === 0) {
       if (ph >= bufEnd - this.BUFFER_EDGE_SEC) {
-        this.enterBufferWait();
+        this.enterBufferWait()
       } else {
-        this.scheduleFrom(this.getAudioPlayheadSec());
+        this.scheduleFrom(this.getAudioPlayheadSec())
       }
     }
   }
 
   wantsStreamPlayback(): boolean {
     return (
-      this.state === "playing" ||
-      (this.state === "buffering" && Boolean(this.session?.wantsPlay))
-    );
+      this.state === 'playing' ||
+      (this.state === 'buffering' && Boolean(this.session?.wantsPlay))
+    )
   }
 
   getPlaybackChunkIndex(): number {
-    if (!this.session?.chunks.length) return 0;
-    const ph = this.getPlayheadSec();
-    let index = this.session.chunks[0].index;
+    if (!this.session?.chunks.length) return 0
+    const ph = this.getPlayheadSec()
+    let index = this.session.chunks[0].index
     for (const ch of this.session.chunks) {
-      if (ph >= ch.startSec - 0.01) index = ch.index;
+      if (ph >= ch.startSec - 0.01) index = ch.index
     }
-    if (this.session.mode === "file" && index === 0) {
-      return 1;
+    if (this.session.mode === 'file' && index === 0) {
+      return 1
     }
-    return index;
+    return index
   }
 
   private getChunkProgress() {
-    if (!this.session) return null;
-    const loaded = this.session.chunks.length;
+    if (!this.session) return null
+    const loaded = this.session.chunks.length
     const total =
       this.session.totalChunks ||
-      (this.session.mode === "file" && loaded > 0 ? 1 : 0);
-    if (loaded === 0 && total === 0) return null;
-    const current = loaded > 0 ? this.getPlaybackChunkIndex() : 0;
-    return { current, loaded, total };
+      (this.session.mode === 'file' && loaded > 0 ? 1 : 0)
+    if (loaded === 0 && total === 0) return null
+    const current = loaded > 0 ? this.getPlaybackChunkIndex() : 0
+    return { current, loaded, total }
   }
 
   private formatChunkProgress(): string {
-    const p = this.getChunkProgress();
-    if (!p) return "";
-    const totalStr = p.total > 0 ? String(p.total) : "?";
-    return `${p.current}/${p.loaded}/${totalStr}`;
+    const p = this.getChunkProgress()
+    if (!p) return ''
+    const totalStr = p.total > 0 ? String(p.total) : '?'
+    return `${p.current}/${p.loaded}/${totalStr}`
   }
 
   private notifyPlaybackControl() {
-    if (!this.session?.jobRunning) return;
+    if (!this.session?.jobRunning) return
     this.onPlaybackControl?.({
       playing: this.wantsStreamPlayback(),
       playbackChunkIndex: this.getPlaybackChunkIndex(),
-    });
+    })
   }
 
   private enterBufferWait() {
-    if (this.state !== "playing" || this.session?.mode !== "streaming") return;
-    if (!this.session?.jobRunning) return;
+    if (this.state !== 'playing' || this.session?.mode !== 'streaming') return
+    if (!this.session?.jobRunning) return
 
-    const bufEnd = this.getBufferedEndSec();
-    const ph = this.getClockPlayheadSec();
+    const bufEnd = this.getBufferedEndSec()
+    const ph = this.getClockPlayheadSec()
     this.playheadSec =
-      bufEnd > 0 ? Math.max(0, Math.min(ph, bufEnd - 0.001)) : 0;
-    this.stopScheduled();
-    this.clearSchedulePipeline();
-    this.clearPlaybackAnchor();
-    this.anchorPlayhead = this.playheadSec;
-    this.state = "buffering";
-    if (this.session) this.session.wantsPlay = true;
-    this.notifyPlaybackControl();
-    this.emitState();
+      bufEnd > 0 ? Math.max(0, Math.min(ph, bufEnd - 0.001)) : 0
+    this.stopScheduled()
+    this.clearSchedulePipeline()
+    this.clearPlaybackAnchor()
+    this.anchorPlayhead = this.playheadSec
+    this.state = 'buffering'
+    if (this.session) this.session.wantsPlay = true
+    this.notifyPlaybackControl()
+    this.emitState()
   }
 
   private async resumeAfterBuffer() {
-    if (!this.session?.wantsPlay || this.knownDurationSec <= 0) return;
-    await this.resumeContext();
-    this.state = "playing";
-    this.setPlaybackAnchor(this.playheadSec);
-    this.scheduleFrom(this.playheadSec);
-    this.startUiLoop();
-    this.notifyPlaybackControl();
-    this.emitState();
+    if (!this.session?.wantsPlay || this.knownDurationSec <= 0) return
+    await this.resumeContext()
+    this.state = 'playing'
+    this.setPlaybackAnchor(this.playheadSec)
+    this.scheduleFrom(this.playheadSec)
+    this.startUiLoop()
+    this.notifyPlaybackControl()
+    this.emitState()
   }
 
   private updateEstimatedTotal() {
-    const totalChunks = this.session?.totalChunks;
-    const received = this.session?.chunks.length ?? 0;
-    if (!totalChunks || received === 0) return;
+    const totalChunks = this.session?.totalChunks
+    const received = this.session?.chunks.length ?? 0
+    if (!totalChunks || received === 0) return
 
-    const avgSecPerChunk = this.knownDurationSec / received;
-    this.totalDurationSec = avgSecPerChunk * totalChunks;
+    const avgSecPerChunk = this.knownDurationSec / received
+    this.totalDurationSec = avgSecPerChunk * totalChunks
 
     if (received >= totalChunks) {
-      this.totalDurationSec = this.knownDurationSec;
+      this.totalDurationSec = this.knownDurationSec
     }
   }
 
   setStreamPlan(jobId: string, { totalChunks }: { totalChunks?: number } = {}) {
-    if (!this.session || this.session.jobId !== jobId) return;
+    if (!this.session || this.session.jobId !== jobId) return
     if (totalChunks && totalChunks > 0) {
-      this.session.totalChunks = totalChunks;
-      this.updateEstimatedTotal();
-      this.emitState();
+      this.session.totalChunks = totalChunks
+      this.updateEstimatedTotal()
+      this.emitState()
     }
   }
 
   private emitState() {
-    this.onStateChange?.(this.state);
-    this.syncUi();
+    this.onStateChange?.(this.state)
+    this.syncUi()
   }
 
   private getSeekMaxSec(): number {
     const hasChunkEstimate =
-      this.session?.mode === "streaming" &&
+      this.session?.mode === 'streaming' &&
       (this.session.totalChunks ?? 0) > 0 &&
-      this.totalDurationSec > 0;
+      this.totalDurationSec > 0
     const displayTotal = hasChunkEstimate
       ? this.totalDurationSec
-      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001);
-    return Math.max(displayTotal, this.knownDurationSec, 0.001);
+      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001)
+    return Math.max(displayTotal, this.knownDurationSec, 0.001)
   }
 
   private getSeekValueSec(playheadSec = this.getPlayheadSec()): number {
-    const seekMax = this.getSeekMaxSec();
-    let ph = Math.min(Math.max(0, playheadSec), seekMax);
+    const seekMax = this.getSeekMaxSec()
+    let ph = Math.min(Math.max(0, playheadSec), seekMax)
     if (this.isStreamingSession() && this.knownDurationSec > 0) {
-      ph = Math.min(ph, this.getStreamingPlayheadCap());
+      ph = Math.min(ph, this.getStreamingPlayheadCap())
     }
-    return ph;
+    return ph
   }
 
   syncUi() {
-    if (this.state === "playing") {
-      this.checkStreamBufferUnderrun();
+    if (this.state === 'playing') {
+      this.checkStreamBufferUnderrun()
     }
-    const { btnPlay, seek, timeLabel, chunksLabel } = this.ui;
-    const playhead = this.getPlayheadSec();
+    const { btnPlay, seek, timeLabel, chunksLabel } = this.ui
+    const playhead = this.getPlayheadSec()
     const hasChunkEstimate =
-      this.session?.mode === "streaming" &&
+      this.session?.mode === 'streaming' &&
       (this.session.totalChunks ?? 0) > 0 &&
-      this.totalDurationSec > 0;
+      this.totalDurationSec > 0
     const displayTotal = hasChunkEstimate
       ? this.totalDurationSec
-      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001);
-    const seekMax = this.getSeekMaxSec();
+      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001)
+    const seekMax = this.getSeekMaxSec()
     const atEnd =
-      this.knownDurationSec > 0 &&
-      playhead >= this.knownDurationSec - 0.05;
+      this.knownDurationSec > 0 && playhead >= this.knownDurationSec - 0.05
 
-    btnPlay.disabled = false;
-    const showPause = this.state === "playing" || this.state === "buffering";
-    btnPlay.textContent = showPause ? "⏸" : "▶";
-    btnPlay.setAttribute("aria-label", showPause ? "Pause" : "Play");
+    btnPlay.disabled = false
+    const showPause = this.state === 'playing' || this.state === 'buffering'
+    btnPlay.textContent = showPause ? '⏸' : '▶'
+    btnPlay.setAttribute('aria-label', showPause ? 'Pause' : 'Play')
 
-    const displayPlayhead = this.getSeekValueSec(playhead);
+    const displayPlayhead = this.getSeekValueSec(playhead)
 
     if (!this.isScrubbing) {
-      seek.max = String(seekMax);
-      seek.value = String(displayPlayhead);
-      seek.disabled = !hasChunkEstimate && this.knownDurationSec <= 0;
+      seek.max = String(seekMax)
+      seek.value = String(displayPlayhead)
+      seek.disabled = !hasChunkEstimate && this.knownDurationSec <= 0
     }
 
     const totalLabel =
       !hasChunkEstimate && this.knownDurationSec <= 0
         ? `${this.formatTime(playhead)} / —`
-        : `${this.formatTime(displayPlayhead)} / ${this.formatTime(displayTotal)}`;
+        : `${this.formatTime(displayPlayhead)} / ${this.formatTime(displayTotal)}`
 
-    timeLabel.textContent = totalLabel;
+    timeLabel.textContent = totalLabel
 
     if (chunksLabel) {
-      const progress = this.formatChunkProgress();
-      chunksLabel.textContent = progress;
-      chunksLabel.hidden = !progress;
+      const progress = this.formatChunkProgress()
+      chunksLabel.textContent = progress
+      chunksLabel.hidden = !progress
     }
 
-    if (this.state === "ended" || (atEnd && this.session?.mode === "file")) {
-      btnPlay.textContent = "▶";
+    if (this.state === 'ended' || (atEnd && this.session?.mode === 'file')) {
+      btnPlay.textContent = '▶'
     }
   }
 
   private stopUiLoop() {
     if (this.rafId) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = 0;
+      cancelAnimationFrame(this.rafId)
+      this.rafId = 0
     }
   }
 
   private startUiLoop() {
-    this.stopUiLoop();
+    this.stopUiLoop()
     const loop = () => {
-      if (this.state !== "playing" && this.state !== "buffering") {
-        this.rafId = 0;
-        return;
+      if (this.state !== 'playing' && this.state !== 'buffering') {
+        this.rafId = 0
+        return
       }
-      if (this.state === "playing") {
-        this.checkStreamBufferUnderrun();
-        const ph = this.getPlayheadSec();
-        const chunkIdx = this.getPlaybackChunkIndex();
+      if (this.state === 'playing') {
+        this.checkStreamBufferUnderrun()
+        const ph = this.getPlayheadSec()
+        const chunkIdx = this.getPlaybackChunkIndex()
         if (chunkIdx !== this._lastNotifiedChunk) {
-          this._lastNotifiedChunk = chunkIdx;
-          this.notifyPlaybackControl();
+          this._lastNotifiedChunk = chunkIdx
+          this.notifyPlaybackControl()
         }
         if (ph >= this.knownDurationSec - 0.02) {
-          if (this.session?.mode === "file") {
-            this.pause();
-            this.playheadSec = this.knownDurationSec;
-            this.state = "ended";
-            this.emitState();
-            this.rafId = 0;
-            return;
+          if (this.session?.mode === 'file') {
+            this.pause()
+            this.playheadSec = this.knownDurationSec
+            this.state = 'ended'
+            this.emitState()
+            this.rafId = 0
+            return
           }
           if (!this.session?.jobRunning) {
-            this.pause();
-            this.state = "paused";
-            this.emitState();
-            this.rafId = 0;
-            return;
+            this.pause()
+            this.state = 'paused'
+            this.emitState()
+            this.rafId = 0
+            return
           }
         }
       }
-      this.syncUi();
-      this.rafId = requestAnimationFrame(loop);
-    };
-    this.rafId = requestAnimationFrame(loop);
+      this.syncUi()
+      this.rafId = requestAnimationFrame(loop)
+    }
+    this.rafId = requestAnimationFrame(loop)
   }
 
   private async decodeB64(b64: string): Promise<AudioBuffer> {
-    await this.resumeContext();
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return this.ctx!.decodeAudioData(bytes.buffer.slice(0));
+    await this.resumeContext()
+    const binary = atob(b64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return this.ctx!.decodeAudioData(bytes.buffer.slice(0))
   }
 
   private stopScheduled() {
     for (const src of this.scheduledSources) {
       try {
-        src.stop();
+        src.stop()
       } catch {
         /* already stopped */
       }
       try {
-        src.disconnect();
+        src.disconnect()
       } catch {
         /* noop */
       }
     }
-    this.scheduledSources = [];
-    this.clearSchedulePipeline();
+    this.scheduledSources = []
+    this.clearSchedulePipeline()
   }
 
   stopPreview() {
     if (this.previewSource) {
       try {
-        this.previewSource.stop();
+        this.previewSource.stop()
       } catch {
         /* noop */
       }
       try {
-        this.previewSource.disconnect();
+        this.previewSource.disconnect()
       } catch {
         /* noop */
       }
-      this.previewSource = null;
+      this.previewSource = null
     }
   }
 
   beginSession(
     jobId: string,
     {
-      title = "",
+      title = '',
       estimatedTotalSec = 0,
       autoPlayOnChunk = false,
     }: {
-      title?: string;
-      estimatedTotalSec?: number;
-      autoPlayOnChunk?: boolean;
-    } = {}
+      title?: string
+      estimatedTotalSec?: number
+      autoPlayOnChunk?: boolean
+    } = {},
   ) {
-    this.stopPreview();
-    this.stopScheduled();
+    this.stopPreview()
+    this.stopScheduled()
     this.session = {
       jobId,
       title,
-      mode: "streaming",
+      mode: 'streaming',
       jobRunning: true,
       autoPlayOnChunk,
       wantsPlay: autoPlayOnChunk,
       chunks: [],
       totalChunks: 0,
       sampleRate: 24000,
-    };
-    this.playheadSec = 0;
-    this.knownDurationSec = 0;
-    this.totalDurationSec = estimatedTotalSec;
-    this.state = "idle";
-    this.anchorCtxTime = null;
-    this.anchorPlayhead = 0;
-    this._lastNotifiedChunk = 0;
-    this.clearPlaybackAnchor();
-    this.emitState();
+    }
+    this.playheadSec = 0
+    this.knownDurationSec = 0
+    this.totalDurationSec = estimatedTotalSec
+    this.state = 'idle'
+    this.anchorCtxTime = null
+    this.anchorPlayhead = 0
+    this._lastNotifiedChunk = 0
+    this.clearPlaybackAnchor()
+    this.emitState()
   }
 
   async appendChunk(
     jobId: string,
     b64: string,
     meta: {
-      chunkIndex: number;
-      totalChunks?: number;
-      duration?: number;
-      sampleRate?: number;
-    }
+      chunkIndex: number
+      totalChunks?: number
+      duration?: number
+      sampleRate?: number
+    },
   ) {
-    if (!this.session || this.session.jobId !== jobId) return;
+    if (!this.session || this.session.jobId !== jobId) return
 
-    const buffer = await this.decodeB64(b64);
-    const durationSec = buffer.duration;
-    const startSec = this.knownDurationSec;
+    const buffer = await this.decodeB64(b64)
+    const durationSec = buffer.duration
+    const startSec = this.knownDurationSec
 
     this.session.chunks.push({
       index: meta.chunkIndex,
       buffer,
       startSec,
       durationSec,
-    });
-    if (meta.sampleRate) this.session.sampleRate = meta.sampleRate;
+    })
+    if (meta.sampleRate) this.session.sampleRate = meta.sampleRate
     if (meta.totalChunks && meta.totalChunks > 0) {
-      this.session.totalChunks = meta.totalChunks;
+      this.session.totalChunks = meta.totalChunks
     }
-    this.knownDurationSec += durationSec;
-    this.updateEstimatedTotal();
+    this.knownDurationSec += durationSec
+    this.updateEstimatedTotal()
 
-    const ph = this.getPlayheadSec();
+    const ph = this.getPlayheadSec()
     const atLiveEdge =
-      this.state === "playing" && ph >= startSec - this.BUFFER_EDGE_SEC;
+      this.state === 'playing' && ph >= startSec - this.BUFFER_EDGE_SEC
     const resumeFromBuffer =
-      this.state === "buffering" && this.session.wantsPlay;
+      this.state === 'buffering' && this.session.wantsPlay
 
     if (resumeFromBuffer) {
-      await this.resumeAfterBuffer();
+      await this.resumeAfterBuffer()
     } else if (atLiveEdge && this.session.wantsPlay) {
-      await this.resumeContext();
-      this.state = "playing";
-      const newChunk = this.session.chunks[this.session.chunks.length - 1];
+      await this.resumeContext()
+      this.state = 'playing'
+      const newChunk = this.session.chunks[this.session.chunks.length - 1]
       if (
         this.scheduledSources.length > 0 &&
         this._scheduleCtxTime != null &&
         this._scheduleTimelineSec != null
       ) {
-        this.appendChunkToPipeline(newChunk);
+        this.appendChunkToPipeline(newChunk)
       } else {
         const resumeAt =
           this._scheduleTimelineSec != null
             ? Math.min(this._scheduleTimelineSec, startSec)
-            : Math.min(this.getAudioPlayheadSec(), startSec);
-        this.scheduleFrom(resumeAt);
+            : Math.min(this.getAudioPlayheadSec(), startSec)
+        this.scheduleFrom(resumeAt)
       }
-      this.startUiLoop();
+      this.startUiLoop()
     } else if (
       this.session.autoPlayOnChunk &&
       this.session.chunks.length === 1
     ) {
-      this.session.autoPlayOnChunk = false;
-      this.session.wantsPlay = true;
-      this.play().catch((e) => console.error("Auto-play failed", e));
+      this.session.autoPlayOnChunk = false
+      this.session.wantsPlay = true
+      this.play().catch((e) => console.error('Auto-play failed', e))
     }
 
-    this.notifyPlaybackControl();
-    this.emitState();
+    this.notifyPlaybackControl()
+    this.emitState()
   }
 
   private bindScheduledSource(src: AudioBufferSourceNode) {
     src.onended = () => {
-      const idx = this.scheduledSources.indexOf(src);
-      if (idx >= 0) this.scheduledSources.splice(idx, 1);
-      if (this.state !== "playing") return;
+      const idx = this.scheduledSources.indexOf(src)
+      if (idx >= 0) this.scheduledSources.splice(idx, 1)
+      if (this.state !== 'playing') return
       if (
         this.scheduledSources.length === 0 &&
         this._scheduleTimelineSec != null
       ) {
-        this.playheadSec = this._scheduleTimelineSec;
-        this.setPlaybackAnchor(this.playheadSec);
+        this.playheadSec = this._scheduleTimelineSec
+        this.setPlaybackAnchor(this.playheadSec)
       }
-      this.checkStreamBufferUnderrun();
-    };
+      this.checkStreamBufferUnderrun()
+    }
   }
 
   private scheduleChunkPortion(
     ch: ChunkEntry,
     timelineSec: number,
-    ctxWhen: number
+    ctxWhen: number,
   ): AudioBufferSourceNode | null {
-    const offset = Math.max(0, timelineSec - ch.startSec);
-    const dur = ch.durationSec - offset;
-    if (dur <= 0.001) return null;
+    const offset = Math.max(0, timelineSec - ch.startSec)
+    const dur = ch.durationSec - offset
+    if (dur <= 0.001) return null
 
-    const ctx = this.ensureContext();
-    const src = ctx.createBufferSource();
-    src.buffer = ch.buffer;
-    src.connect(this.sessionGain!);
-    src.start(ctxWhen, offset, dur);
-    this.scheduledSources.push(src);
-    this.bindScheduledSource(src);
-    this._scheduleCtxTime = ctxWhen + dur;
-    this._scheduleTimelineSec = ch.startSec + ch.durationSec;
-    return src;
+    const ctx = this.ensureContext()
+    const src = ctx.createBufferSource()
+    src.buffer = ch.buffer
+    src.connect(this.sessionGain!)
+    src.start(ctxWhen, offset, dur)
+    this.scheduledSources.push(src)
+    this.bindScheduledSource(src)
+    this._scheduleCtxTime = ctxWhen + dur
+    this._scheduleTimelineSec = ch.startSec + ch.durationSec
+    return src
   }
 
   private appendChunkToPipeline(ch: ChunkEntry) {
     if (this._scheduleTimelineSec == null || this._scheduleCtxTime == null) {
-      this.scheduleFrom(ch.startSec);
-      return;
+      this.scheduleFrom(ch.startSec)
+      return
     }
     if (ch.startSec + ch.durationSec <= this._scheduleTimelineSec + 0.0001) {
-      return;
+      return
     }
-    const timelineSec = Math.max(ch.startSec, this._scheduleTimelineSec);
-    this.scheduleChunkPortion(ch, timelineSec, this._scheduleCtxTime);
+    const timelineSec = Math.max(ch.startSec, this._scheduleTimelineSec)
+    this.scheduleChunkPortion(ch, timelineSec, this._scheduleCtxTime)
   }
 
   private scheduleFrom(playheadSec: number) {
-    this.stopScheduled();
-    if (!this.session?.chunks.length) return;
+    this.stopScheduled()
+    if (!this.session?.chunks.length) return
 
-    const ctx = this.ensureContext();
-    const bufEnd = this.getBufferedEndSec();
+    const ctx = this.ensureContext()
+    const bufEnd = this.getBufferedEndSec()
     const startPh =
       bufEnd > 0
         ? Math.max(0, Math.min(playheadSec, bufEnd - 0.001))
-        : Math.max(0, playheadSec);
-    this.setPlaybackAnchor(startPh);
+        : Math.max(0, playheadSec)
+    this.setPlaybackAnchor(startPh)
 
-    let when = ctx.currentTime;
-    let t = startPh;
+    let when = ctx.currentTime
+    let t = startPh
 
     for (const ch of this.session.chunks) {
-      const chEnd = ch.startSec + ch.durationSec;
-      if (chEnd <= t + 0.0001) continue;
+      const chEnd = ch.startSec + ch.durationSec
+      if (chEnd <= t + 0.0001) continue
 
-      const offset = Math.max(0, t - ch.startSec);
-      const dur = ch.durationSec - offset;
-      if (dur <= 0.001) continue;
+      const offset = Math.max(0, t - ch.startSec)
+      const dur = ch.durationSec - offset
+      if (dur <= 0.001) continue
 
-      const src = ctx.createBufferSource();
-      src.buffer = ch.buffer;
-      src.connect(this.sessionGain!);
-      src.start(when, offset, dur);
-      this.scheduledSources.push(src);
-      this.bindScheduledSource(src);
-      when += dur;
-      t = ch.startSec + ch.durationSec;
+      const src = ctx.createBufferSource()
+      src.buffer = ch.buffer
+      src.connect(this.sessionGain!)
+      src.start(when, offset, dur)
+      this.scheduledSources.push(src)
+      this.bindScheduledSource(src)
+      when += dur
+      t = ch.startSec + ch.durationSec
     }
     if (t > startPh + 0.0001) {
-      this._scheduleCtxTime = when;
-      this._scheduleTimelineSec = t;
+      this._scheduleCtxTime = when
+      this._scheduleTimelineSec = t
     }
   }
 
   async play() {
-    if (!this.session) return;
-    await this.resumeContext();
-    this.stopPreview();
+    if (!this.session) return
+    await this.resumeContext()
+    this.stopPreview()
 
-    if (this.session) this.session.wantsPlay = true;
+    if (this.session) this.session.wantsPlay = true
 
     if (this.knownDurationSec <= 0) {
-      this.state = "buffering";
-      this.playheadSec = 0;
-      this.clearPlaybackAnchor();
-      this.startUiLoop();
-      this.notifyPlaybackControl();
-      this.emitState();
-      return;
+      this.state = 'buffering'
+      this.playheadSec = 0
+      this.clearPlaybackAnchor()
+      this.startUiLoop()
+      this.notifyPlaybackControl()
+      this.emitState()
+      return
     }
 
-    let ph = this.playheadSec;
-    if (ph >= this.knownDurationSec - 0.05) ph = 0;
+    let ph = this.playheadSec
+    if (ph >= this.knownDurationSec - 0.05) ph = 0
 
-    this.state = "playing";
-    this.setPlaybackAnchor(ph);
-    this.scheduleFrom(this.getAudioPlayheadSec());
-    this.startUiLoop();
-    this.notifyPlaybackControl();
-    this.emitState();
+    this.state = 'playing'
+    this.setPlaybackAnchor(ph)
+    this.scheduleFrom(this.getAudioPlayheadSec())
+    this.startUiLoop()
+    this.notifyPlaybackControl()
+    this.emitState()
   }
 
   pause() {
-    if (this.state === "playing" || this.state === "buffering") {
-      this.playheadSec = this.getPlayheadSec();
+    if (this.state === 'playing' || this.state === 'buffering') {
+      this.playheadSec = this.getPlayheadSec()
     }
-    this.stopScheduled();
-    this.state = "paused";
-    this.clearPlaybackAnchor();
-    if (this.session) this.session.wantsPlay = false;
-    this.stopUiLoop();
-    this.notifyPlaybackControl();
-    this.emitState();
+    this.stopScheduled()
+    this.state = 'paused'
+    this.clearPlaybackAnchor()
+    if (this.session) this.session.wantsPlay = false
+    this.stopUiLoop()
+    this.notifyPlaybackControl()
+    this.emitState()
   }
 
   togglePlay() {
-    if (this.state === "playing" || this.state === "buffering") this.pause();
-    else this.play();
+    if (this.state === 'playing' || this.state === 'buffering') this.pause()
+    else this.play()
   }
 
   seek(sec: number) {
-    const max = this.getSeekMaxSec();
-    this.playheadSec = this.getSeekValueSec(Math.max(0, Math.min(sec, max)));
-    if (this.state === "playing" || this.state === "buffering") {
-      this.ensureContext();
-      if (this.session) this.session.wantsPlay = true;
+    const max = this.getSeekMaxSec()
+    this.playheadSec = this.getSeekValueSec(Math.max(0, Math.min(sec, max)))
+    if (this.state === 'playing' || this.state === 'buffering') {
+      this.ensureContext()
+      if (this.session) this.session.wantsPlay = true
       if (this.playheadSec < this.knownDurationSec - this.BUFFER_EDGE_SEC) {
-        this.state = "playing";
-        this.scheduleFrom(this.getAudioPlayheadSec());
-        this.startUiLoop();
+        this.state = 'playing'
+        this.scheduleFrom(this.getAudioPlayheadSec())
+        this.startUiLoop()
       } else {
-        this.stopScheduled();
-        this.state = "buffering";
-        this.clearPlaybackAnchor();
-        this.anchorPlayhead = this.playheadSec;
-        this.startUiLoop();
+        this.stopScheduled()
+        this.state = 'buffering'
+        this.clearPlaybackAnchor()
+        this.anchorPlayhead = this.playheadSec
+        this.startUiLoop()
       }
     }
-    this.notifyPlaybackControl();
-    this.syncUi();
+    this.notifyPlaybackControl()
+    this.syncUi()
   }
 
   async loadFile(jobId: string, filePath: string, durationHint?: number) {
-    if (!this.session || this.session.jobId !== jobId) return;
+    if (!this.session || this.session.jobId !== jobId) return
     try {
-      const b64 = await window.ttsApp.readFileBase64(filePath);
-      const buffer = await this.decodeB64(b64);
-      this.stopScheduled();
-      this.session.mode = "file";
-      this.session.jobRunning = false;
+      const b64 = await window.ttsApp.readFileBase64(filePath)
+      const buffer = await this.decodeB64(b64)
+      this.stopScheduled()
+      this.session.mode = 'file'
+      this.session.jobRunning = false
       this.session.chunks = [
         { index: 0, buffer, startSec: 0, durationSec: buffer.duration },
-      ];
-      this.knownDurationSec = buffer.duration;
-      this.totalDurationSec = durationHint ?? buffer.duration;
+      ]
+      this.knownDurationSec = buffer.duration
+      this.totalDurationSec = durationHint ?? buffer.duration
       if (
-        this.state === "playing" &&
+        this.state === 'playing' &&
         this.getPlayheadSec() > this.knownDurationSec
       ) {
-        this.playheadSec = 0;
-        this.pause();
+        this.playheadSec = 0
+        this.pause()
       }
-      this.emitState();
+      this.emitState()
     } catch (e) {
-      console.error("Failed to load output file for playback", e);
+      console.error('Failed to load output file for playback', e)
     }
   }
 
   endSession(
     jobId: string,
-    { reason = "ended" }: { reason?: "ended" | "error" | "cancelled" } = {}
+    { reason = 'ended' }: { reason?: 'ended' | 'error' | 'cancelled' } = {},
   ) {
-    if (this.session?.jobId !== jobId) return;
-    this.session.jobRunning = false;
-    if (reason === "ended" && this.knownDurationSec > 0) {
-      this.totalDurationSec = this.knownDurationSec;
+    if (this.session?.jobId !== jobId) return
+    this.session.jobRunning = false
+    if (reason === 'ended' && this.knownDurationSec > 0) {
+      this.totalDurationSec = this.knownDurationSec
     }
-    if (reason === "error" || reason === "cancelled") {
-      this.stopScheduled();
-      this.stopPreview();
-      if (reason === "cancelled") this.state = "idle";
+    if (reason === 'error' || reason === 'cancelled') {
+      this.stopScheduled()
+      this.stopPreview()
+      if (reason === 'cancelled') this.state = 'idle'
     }
-    this.emitState();
+    this.emitState()
   }
 
   async playPreview(b64: string): Promise<void> {
-    await this.resumeContext();
-    this.pause();
-    this.stopPreview();
-    const buffer = await this.decodeB64(b64);
+    await this.resumeContext()
+    this.pause()
+    this.stopPreview()
+    const buffer = await this.decodeB64(b64)
     return new Promise((resolve, reject) => {
-      const src = this.ctx!.createBufferSource();
-      this.previewSource = src;
-      src.buffer = buffer;
-      src.connect(this.masterGain!);
+      const src = this.ctx!.createBufferSource()
+      this.previewSource = src
+      src.buffer = buffer
+      src.connect(this.masterGain!)
       src.onended = () => {
-        this.previewSource = null;
-        resolve();
-      };
-      try {
-        src.start(0);
-      } catch (e) {
-        reject(e);
+        this.previewSource = null
+        resolve()
       }
-    });
+      try {
+        src.start(0)
+      } catch (e) {
+        reject(e)
+      }
+    })
   }
 
   reset() {
-    this.stopUiLoop();
-    this.pause();
-    this.stopPreview();
-    this.session = null;
-    this.knownDurationSec = 0;
-    this.totalDurationSec = 0;
-    this.playheadSec = 0;
-    this.state = "idle";
-    this.emitState();
+    this.stopUiLoop()
+    this.pause()
+    this.stopPreview()
+    this.session = null
+    this.knownDurationSec = 0
+    this.totalDurationSec = 0
+    this.playheadSec = 0
+    this.state = 'idle'
+    this.emitState()
   }
 }
