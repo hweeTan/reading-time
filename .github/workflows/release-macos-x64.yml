@@ -1,0 +1,66 @@
+# Manual release build: Intel macOS (x86_64) DMG only.
+# Uses macos-15-intel so bundled Python/native wheels match x64 (see actions/runner-images README).
+name: Release macOS x64 (DMG)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-macos-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dmg:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: electron
+
+    env:
+      # Unsigned CI build; avoids hanging on code-sign discovery.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: electron/pnpm-lock.yaml
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert x86_64 runner
+        run: test "$(uname -m)" = "x86_64"
+
+      - name: Build renderer, bundle, and x64 DMG
+        run: |
+          set -euo pipefail
+          pnpm run build:renderer
+          pnpm run prepare-bundle
+          pnpm exec electron-builder --mac dmg --x64 --publish never
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReadingTime-macos-x64
+          path: electron/dist/*.dmg
+          if-no-files-found: error
