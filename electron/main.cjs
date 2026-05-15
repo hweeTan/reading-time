@@ -79,13 +79,13 @@ function assertWorkerRuntime() {
   }
   if (isPackagedApp() && !fs.existsSync(py)) {
     throw new Error(
-      `Bundled Python not found at ${py}. Run: npm run prepare-bundle (from electron/)`,
+      `Bundled Python not found at ${py}. Run: pnpm run prepare-bundle (from electron/)`,
     )
   }
   if (!isPackagedApp() && !fs.existsSync(devBundlePythonExecutable())) {
     console.warn(
       `[ReadingTime] Dev bundle Python not found. Using "${py}" from PATH.\n` +
-        `  If the worker fails, run: cd electron && npm run prepare-bundle\n` +
+        `  If the worker fails, run: cd electron && pnpm run prepare-bundle\n` +
         `  Or set TTS_PYTHON to your venv python.`,
     )
   }
@@ -160,7 +160,7 @@ function waitForWorkerReady(maxMs = 180_000) {
           new Error(
             `Python worker exited during startup (code ${pythonProc.exitCode}).` +
               hint +
-              '\n\nTry: cd electron && npm run prepare-bundle',
+              '\n\nTry: cd electron && pnpm run prepare-bundle',
           ),
         )
         return
@@ -252,7 +252,7 @@ app.whenReady().then(async () => {
     console.error(err)
     dialog.showErrorBox(
       'ReadingTime',
-      `${err.message}\n\nDevelopment: cd electron && npm run prepare-bundle\nThen: npm run dev`,
+      `${err.message}\n\nDevelopment: cd electron && pnpm run prepare-bundle\nThen: pnpm run dev`,
     )
     app.quit()
   }

@@ -333,6 +333,53 @@ export class AudioPlayer {
     }
   }
 
+  private rebuildChunkTimeline() {
+    if (!this.session) return
+    let start = 0
+    for (const ch of this.session.chunks) {
+      ch.startSec = start
+      start += ch.durationSec
+    }
+    this.knownDurationSec = start
+    this.updateEstimatedTotal()
+  }
+
+  truncateFromChunk(fromIndex: number) {
+    if (!this.session || fromIndex < 1) return
+
+    const fromChunk = this.session.chunks.find((c) => c.index === fromIndex)
+    const cutStartSec = fromChunk?.startSec ?? this.knownDurationSec
+    const wasPlaying =
+      this.state === 'playing' || this.state === 'buffering'
+
+    this.session.chunks = this.session.chunks.filter((c) => c.index < fromIndex)
+    this.rebuildChunkTimeline()
+
+    if (this.getPlayheadSec() >= cutStartSec - 0.01) {
+      this.playheadSec = this.knownDurationSec
+    }
+
+    this.stopScheduled()
+    this.clearSchedulePipeline()
+
+    if (wasPlaying && this.session.wantsPlay) {
+      if (this.knownDurationSec > 0) {
+        this.state = 'playing'
+        this.setPlaybackAnchor(this.playheadSec)
+        this.scheduleFrom(this.getAudioPlayheadSec())
+        this.startUiLoop()
+      } else {
+        this.state = 'buffering'
+        this.clearPlaybackAnchor()
+        this.anchorPlayhead = this.playheadSec
+        this.startUiLoop()
+      }
+    }
+
+    this.notifyPlaybackControl()
+    this.emitState()
+  }
+
   private emitState() {
     this.onStateChange?.(this.state)
     this.syncUi()
@@ -543,6 +590,15 @@ export class AudioPlayer {
 
     const buffer = await this.decodeB64(b64)
     const durationSec = buffer.duration
+
+    const existing = this.session.chunks.findIndex(
+      (c) => c.index === meta.chunkIndex,
+    )
+    if (existing >= 0) {
+      this.session.chunks = this.session.chunks.slice(0, existing)
+      this.rebuildChunkTimeline()
+    }
+
     const startSec = this.knownDurationSec
 
     this.session.chunks.push({

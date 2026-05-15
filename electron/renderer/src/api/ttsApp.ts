@@ -7,7 +7,7 @@ import type {
 function bridge() {
   if (typeof window === "undefined" || !window.ttsApp) {
     throw new Error(
-      "ReadingTime backend is unavailable. Run the Electron app with npm run dev from electron/ (do not open the Vite URL in a browser)."
+      "ReadingTime backend is unavailable. Run the Electron app with pnpm run dev from electron/ (do not open the Vite URL in a browser)."
     );
   }
   return window.ttsApp;

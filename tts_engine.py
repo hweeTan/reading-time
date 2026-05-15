@@ -62,6 +62,7 @@ class JobState:
     throttled: bool = False
     paused: bool = False
     playback_chunk: int = 1
+    regenerate_from: int | None = None
     lookahead: int = STREAM_LOOKAHEAD_CHUNKS
     _wake: threading.Condition = field(default_factory=threading.Condition)
 
@@ -218,11 +219,46 @@ class TTSEngine:
         if not job:
             return
         with job._wake:
-            if voice_id is not None:
+            changed = False
+            if voice_id is not None and voice_id != job.voice_id:
                 job.voice_id = voice_id
-            if emotion is not None:
+                changed = True
+            if emotion is not None and emotion != job.emotion:
                 job.emotion = emotion
+                changed = True
+            if changed and job.throttled:
+                job.regenerate_from = job.playback_chunk
             job._wake.notify_all()
+
+    def _consume_regenerate(
+        self,
+        job: JobState,
+        *,
+        chunk_wavs: list[np.ndarray],
+        sample_rate: int,
+        on_event: EventCallback,
+        job_id: str,
+    ) -> tuple[list[np.ndarray], float, int | None]:
+        """Truncate synthesized audio and return chunk index to re-synthesize."""
+        with job._wake:
+            from_idx = job.regenerate_from
+            if from_idx is None:
+                total = sum(len(w) / sample_rate for w in chunk_wavs)
+                return chunk_wavs, total, None
+            job.regenerate_from = None
+        from_idx = max(1, int(from_idx))
+        keep = from_idx - 1
+        chunk_wavs = chunk_wavs[:keep]
+        total = sum(len(w) / sample_rate for w in chunk_wavs)
+        on_event(
+            {
+                "type": "chunks_truncated",
+                "jobId": job_id,
+                "fromChunkIndex": from_idx,
+                "totalDuration": total,
+            }
+        )
+        return chunk_wavs, total, from_idx
 
     def synthesize(
         self,
@@ -267,11 +303,37 @@ class TTSEngine:
             }
             chunk_wavs: list[np.ndarray] = []
             total_duration = 0.0
+            sample_rate = self._tts.sample_rate
+            idx = 1
 
-            for idx, chunk_text in enumerate(text_chunks, start=1):
+            while idx <= len(text_chunks):
+                chunk_wavs, total_duration, regen_idx = self._consume_regenerate(
+                    job,
+                    chunk_wavs=chunk_wavs,
+                    sample_rate=sample_rate,
+                    on_event=on_event,
+                    job_id=job_id,
+                )
+                if regen_idx is not None:
+                    idx = regen_idx
+                    continue
+
                 if not job.wait_for_chunk(idx):
                     on_event({"type": "job_cancelled", "jobId": job_id})
                     return
+
+                chunk_wavs, total_duration, regen_idx = self._consume_regenerate(
+                    job,
+                    chunk_wavs=chunk_wavs,
+                    sample_rate=sample_rate,
+                    on_event=on_event,
+                    job_id=job_id,
+                )
+                if regen_idx is not None:
+                    idx = regen_idx
+                    continue
+
+                chunk_text = text_chunks[idx - 1]
 
                 with job._wake:
                     voice_id = job.voice_id
@@ -305,8 +367,29 @@ class TTSEngine:
                         f"Chunk {idx}/{len(text_chunks)} failed: {exc}"
                     ) from exc
 
+                with job._wake:
+                    from_idx = job.regenerate_from
+                    if from_idx is not None:
+                        from_idx = max(1, int(from_idx))
+                        job.regenerate_from = None
+                        if from_idx <= idx:
+                            chunk_wavs = chunk_wavs[: from_idx - 1]
+                            total_duration = sum(
+                                len(w) / sample_rate for w in chunk_wavs
+                            )
+                            on_event(
+                                {
+                                    "type": "chunks_truncated",
+                                    "jobId": job_id,
+                                    "fromChunkIndex": from_idx,
+                                    "totalDuration": total_duration,
+                                }
+                            )
+                            idx = from_idx
+                            continue
+
                 chunk_wavs.append(wav)
-                chunk_seconds = len(wav) / self._tts.sample_rate
+                chunk_seconds = len(wav) / sample_rate
                 total_duration += chunk_seconds
 
                 on_event(
@@ -317,8 +400,8 @@ class TTSEngine:
                         "totalChunks": len(text_chunks),
                         "duration": chunk_seconds,
                         "totalDuration": total_duration,
-                        "sampleRate": self._tts.sample_rate,
-                        "audioWavBase64": self._wav_to_b64(wav, self._tts.sample_rate),
+                        "sampleRate": sample_rate,
+                        "audioWavBase64": self._wav_to_b64(wav, sample_rate),
                     }
                 )
 
@@ -332,6 +415,7 @@ class TTSEngine:
                         "totalDuration": total_duration,
                     }
                 )
+                idx += 1
 
             if job.cancel.is_set():
                 on_event({"type": "job_cancelled", "jobId": job_id})

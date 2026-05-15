@@ -42,6 +42,12 @@ export type JobEvent =
   | { type: "chunk_started"; jobId: string; chunkIndex: number; totalChunks?: number }
   | { type: "chunk_done"; jobId: string; chunkIndex: number; totalChunks?: number }
   | {
+      type: "chunks_truncated";
+      jobId: string;
+      fromChunkIndex: number;
+      totalDuration?: number;
+    }
+  | {
       type: "chunk_audio";
       jobId: string;
       chunkIndex: number;

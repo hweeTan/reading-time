@@ -79,6 +79,8 @@ export default function App() {
   const streamTextChangeTimer = useRef<ReturnType<typeof setTimeout> | null>(
     null
   );
+  const streamRestartPendingRef = useRef(false);
+  const pendingStreamAutoPlayRef = useRef(true);
   const playerRef = useRef<AudioPlayer | null>(null);
   const modelsReadyRef = useRef(false);
   /** Always-current textarea value for audio handlers (avoids stale closures). */
@@ -102,9 +104,15 @@ export default function App() {
   const applyLiveSynthSettings = useCallback(
     (vId: string, emo: string) => {
       const stream = streamJobRef.current;
+      const player = playerRef.current;
       if (stream?.status === "running") {
-        ttsApi
-          .setJobSynthConfig(stream.id, vId, emo)
+        const chunk = player?.getPlaybackChunkIndex() || 1;
+        const playing = player?.wantsStreamPlayback() ?? false;
+        const syncPlayback = player
+          ? ttsApi.setJobPlayback(stream.id, playing, chunk)
+          : Promise.resolve();
+        syncPlayback
+          .then(() => ttsApi.setJobSynthConfig(stream.id, vId, emo))
           .catch(() => { });
         return;
       }
@@ -295,27 +303,30 @@ export default function App() {
     [setStatus]
   );
 
-  const stopStreamPlayback = useCallback(() => {
-    const streamJob = streamJobRef.current;
+  const clearAndCancelStream = useCallback((): boolean => {
     const player = playerRef.current;
-    if (streamJob?.status === "running" && player) {
+    const streamJob = streamJobRef.current;
+    const hadPlayback =
+      streamSourceTextRef.current !== null ||
+      streamJob?.status === "running" ||
+      Boolean(player?.session);
+
+    if (!hadPlayback) return false;
+
+    if (streamJob?.status === "running") {
       syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
       ttsApi.cancelJob(streamJob.id).catch(() => { });
-      player.endSession(streamJob.id, { reason: "cancelled" });
-    } else if (player?.session) {
-      player.reset();
     }
     streamJobRef.current = null;
     streamSourceTextRef.current = null;
     lastStreamPlaybackSync.current = { playing: null, chunk: null };
+    player?.reset();
+    return true;
   }, [syncStreamPlaybackControl]);
 
-  const isStreamActive = useCallback(() => {
-    return Boolean(
-      streamJobRef.current?.status === "running" ||
-      playerRef.current?.session?.jobRunning
-    );
-  }, []);
+  const stopStreamPlayback = useCallback(() => {
+    clearAndCancelStream();
+  }, [clearAndCancelStream]);
 
   const startStreamPlayback = useCallback(
     async ({ autoPlay = true }: { autoPlay?: boolean } = {}) => {
@@ -334,10 +345,9 @@ export default function App() {
       if (streamJob?.status === "running") {
         syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
         ttsApi.cancelJob(streamJob.id).catch(() => { });
-        player.endSession(streamJob.id, { reason: "cancelled" });
-      } else if (player.session) {
-        player.reset();
       }
+      streamJobRef.current = null;
+      player.reset();
 
       const id = `stream-${++jobCounterRef.current}`;
       const title = streamJobTitle(synthText);
@@ -379,43 +389,14 @@ export default function App() {
   );
 
   const handleStreamTextChange = useCallback(() => {
-    if (
-      streamSourceTextRef.current === null &&
-      !isStreamActive() &&
-      !playerRef.current?.session
-    ) {
-      return;
-    }
+    if (!streamRestartPendingRef.current) return;
+    streamRestartPendingRef.current = false;
 
     const current = getSynthText();
+    if (!current) return;
 
-    if (!current) {
-      if (isStreamActive() || playerRef.current?.session) {
-        stopStreamPlayback();
-        setStatus("Playback stopped — text is empty");
-      }
-      return;
-    }
-
-    if (current === streamSourceTextRef.current) {
-      return;
-    }
-
-    if (!isStreamActive() && !playerRef.current?.session) {
-      streamSourceTextRef.current = null;
-      return;
-    }
-
-    const resumePlaying = playerRef.current?.wantsStreamPlayback() ?? false;
-    setStatus("Text changed — restarting…");
-    void startStreamPlayback({ autoPlay: resumePlaying });
-  }, [
-    getSynthText,
-    isStreamActive,
-    stopStreamPlayback,
-    setStatus,
-    startStreamPlayback,
-  ]);
+    void startStreamPlayback({ autoPlay: pendingStreamAutoPlayRef.current });
+  }, [getSynthText, startStreamPlayback]);
 
   const failJob = useCallback(
     (jobId: string, message: string) => {
@@ -502,7 +483,10 @@ export default function App() {
       if (streamJob.status === "error" || streamJob.status === "cancelled")
         return true;
 
-      if (event.type === "chunk_audio" && "audioWavBase64" in event && event.audioWavBase64) {
+      if (event.type === "chunks_truncated") {
+        player.truncateFromChunk(event.fromChunkIndex ?? 1);
+        setStatus(`Regenerating from chunk ${event.fromChunkIndex ?? 1}…`);
+      } else if (event.type === "chunk_audio" && "audioWavBase64" in event && event.audioWavBase64) {
         if (event.totalChunks) {
           player.setStreamPlan(streamJob.id, {
             totalChunks: event.totalChunks,
@@ -516,6 +500,9 @@ export default function App() {
             sampleRate: event.sampleRate,
           })
           .catch((e) => console.error("Chunk decode failed", e));
+        if (streamJob.status === "running") {
+          setStatus(`Playing: ${streamJob.title}`);
+        }
       } else if (event.type === "job_complete") {
         streamJob.status = "done";
         player.endSession(streamJob.id, { reason: "ended" });
@@ -714,7 +701,7 @@ export default function App() {
       try {
         if (typeof window.ttsApp === "undefined") {
           throw new Error(
-            "Electron bridge missing — use npm run dev from electron/, not a browser tab."
+            "Electron bridge missing — use pnpm run dev from electron/, not a browser tab."
           );
         }
         await ttsApi.ping();
@@ -756,15 +743,38 @@ export default function App() {
   const handleStreamTextChangeRef = useRef(handleStreamTextChange);
   handleStreamTextChangeRef.current = handleStreamTextChange;
 
-  const handleTextChange = useCallback((value: string) => {
-    setInputText(value);
-    if (streamTextChangeTimer.current) {
-      clearTimeout(streamTextChangeTimer.current);
-    }
-    streamTextChangeTimer.current = setTimeout(() => {
-      handleStreamTextChangeRef.current();
-    }, STREAM_TEXT_DEBOUNCE_MS);
-  }, [setInputText]);
+  const handleTextChange = useCallback(
+    (value: string) => {
+      setInputText(value);
+      const cleaned = stripUnwantedChars(value).trim() || null;
+      const source = streamSourceTextRef.current;
+      const hadPlayback =
+        source !== null ||
+        streamJobRef.current?.status === "running" ||
+        Boolean(playerRef.current?.session);
+
+      if (hadPlayback && cleaned !== source) {
+        streamRestartPendingRef.current = true;
+        pendingStreamAutoPlayRef.current =
+          playerRef.current?.wantsStreamPlayback() ?? false;
+        if (clearAndCancelStream()) {
+          setStatus(
+            cleaned
+              ? "Text changed — restarting…"
+              : "Playback stopped — text is empty"
+          );
+        }
+      }
+
+      if (streamTextChangeTimer.current) {
+        clearTimeout(streamTextChangeTimer.current);
+      }
+      streamTextChangeTimer.current = setTimeout(() => {
+        handleStreamTextChangeRef.current();
+      }, STREAM_TEXT_DEBOUNCE_MS);
+    },
+    [setInputText, clearAndCancelStream, setStatus]
+  );
 
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -772,7 +782,7 @@ export default function App() {
       setDragOver(false);
       const files = [...e.dataTransfer.files];
       if (files.length === 1 && files[0].type.startsWith("text/")) {
-        setInputText(await files[0].text());
+        handleTextChange(await files[0].text());
         return;
       }
       const paths = files
@@ -780,7 +790,7 @@ export default function App() {
         .filter(Boolean);
       if (paths.length) await importFiles(paths);
     },
-    [importFiles, setInputText]
+    [importFiles, handleTextChange]
   );
 
   const handlePreview = useCallback(async () => {

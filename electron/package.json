@@ -8,14 +8,14 @@
     "dev:vite": "vite --config renderer/vite.config.ts",
     "dev:electron": "wait-on http://127.0.0.1:5173 && ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .",
     "dev:electron:debug": "wait-on http://127.0.0.1:5173 && ELECTRON_RENDERER_URL=http://127.0.0.1:5173 ELECTRON_OPEN_DEVTOOLS=1 electron .",
-    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
-    "dev:debug": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron:debug\"",
-    "dev:setup": "npm run prepare-bundle && npm run dev",
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"pnpm:dev:vite\" \"pnpm:dev:electron\"",
+    "dev:debug": "concurrently -k -n vite,electron -c cyan,magenta \"pnpm:dev:vite\" \"pnpm:dev:electron:debug\"",
+    "dev:setup": "pnpm run prepare-bundle && pnpm run dev",
     "build:renderer": "vite build --config renderer/vite.config.ts",
-    "start": "npm run build:renderer && electron .",
+    "start": "pnpm run build:renderer && electron .",
     "prepare-bundle": "bash ../scripts/prepare-bundle.sh",
-    "pack": "npm run build:renderer && npm run prepare-bundle && electron-builder --dir",
-    "dist": "npm run build:renderer && npm run prepare-bundle && electron-builder"
+    "pack": "pnpm run build:renderer && pnpm run prepare-bundle && electron-builder --dir",
+    "dist": "pnpm run build:renderer && pnpm run prepare-bundle && electron-builder"
   },
   "build": {
     "appId": "com.hweetan.readingtime",
