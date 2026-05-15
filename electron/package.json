@@ -1,8 +1,8 @@
 {
-  "name": "vieneu-tts-app",
+  "name": "readingtime",
   "version": "1.0.0",
-  "description": "VieNeu TTS desktop app — Vietnamese text-to-speech",
-  "author": "VieNeu TTS",
+  "description": "ReadingTime — Vietnamese text-to-speech desktop app",
+  "author": "HweeTan",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
@@ -12,8 +12,8 @@
     "dist": "npm run prepare-bundle && electron-builder"
   },
   "build": {
-    "appId": "com.vieneu.tts",
-    "productName": "VieNeu TTS",
+    "appId": "com.hweetan.readingtime",
+    "productName": "ReadingTime",
     "directories": {
       "output": "dist"
     },
@@ -27,24 +27,31 @@
       {
         "from": "../bundle/python",
         "to": "python",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../bundle/tts",
         "to": "tts",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
       "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
     },
     "dmg": {
-      "title": "VieNeu TTS ${version}"
+      "title": "ReadingTime ${version}"
     }
   },
   "devDependencies": {

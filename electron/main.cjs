@@ -152,7 +152,7 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 640,
-    title: "VieNeu TTS",
+    title: "ReadingTime",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -170,7 +170,7 @@ app.whenReady().then(() => {
   } catch (err) {
     console.error(err);
     dialog.showErrorBox(
-      "VieNeu TTS",
+      "ReadingTime",
       `${err.message}\n\nDevelopment: run from electron/ with npm start.\nBuild: npm run dist (prepares Python bundle first).`
     );
     app.quit();
