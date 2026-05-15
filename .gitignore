@@ -1,0 +1,12 @@
+.bundle/
+bundle/
+dist/
+*.dmg
+*.zip
+__pycache__/
+*.pyc
+.Python
+output.wav
+.env
+.DS_Store
+node_modules/

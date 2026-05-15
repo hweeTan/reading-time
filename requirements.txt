@@ -1,0 +1,7 @@
+vieneu
+numpy
+soundfile
+sounddevice
+
+# Optional on Apple Silicon (faster GGUF inference via Metal):
+# pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal/

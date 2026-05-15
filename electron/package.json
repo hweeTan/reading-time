@@ -1,0 +1,54 @@
+{
+  "name": "vieneu-tts-app",
+  "version": "1.0.0",
+  "description": "VieNeu TTS desktop app — Vietnamese text-to-speech",
+  "author": "VieNeu TTS",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "prepare-bundle": "bash ../scripts/prepare-bundle.sh",
+    "pack": "npm run prepare-bundle && electron-builder --dir",
+    "dist": "npm run prepare-bundle && electron-builder"
+  },
+  "build": {
+    "appId": "com.vieneu.tts",
+    "productName": "VieNeu TTS",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer/**/*"
+    ],
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "../bundle/python",
+        "to": "python",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../bundle/tts",
+        "to": "tts",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "dmg": {
+      "title": "VieNeu TTS ${version}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}
