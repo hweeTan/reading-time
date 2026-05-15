@@ -6,6 +6,10 @@ const textInput = $("#text-input");
 const dropZone = $("#drop-zone");
 const voiceSelect = $("#voice-select");
 const emotionSelect = $("#emotion-select");
+const btnPreview = $("#btn-preview");
+let previewLoading = false;
+let previewPlaying = false;
+let previewStoppedByUser = false;
 const outputDir = $("#output-dir");
 const jobList = $("#job-list");
 const queueEmpty = $("#queue-empty");
@@ -65,12 +69,37 @@ function applySavedVoice() {
   }
 }
 
+function applyLiveSynthSettings() {
+  if (streamJob?.status === "running") {
+    window.ttsApp
+      .rpc("set_job_synth_config", {
+        jobId: streamJob.id,
+        voiceId: voiceSelect.value,
+        emotion: emotionSelect.value,
+      })
+      .catch(() => {});
+    return;
+  }
+  const runningJob = jobs.find((j) => j.status === "running");
+  if (runningJob) {
+    window.ttsApp
+      .rpc("set_job_synth_config", {
+        jobId: runningJob.id,
+        voiceId: voiceSelect.value,
+        emotion: emotionSelect.value,
+      })
+      .catch(() => {});
+  }
+}
+
 function bindSynthPreferences() {
   voiceSelect.addEventListener("change", () => {
     if (voiceSelect.value) localStorage.setItem(PREF_VOICE_ID, voiceSelect.value);
+    applyLiveSynthSettings();
   });
   emotionSelect.addEventListener("change", () => {
     if (emotionSelect.value) localStorage.setItem(PREF_EMOTION, emotionSelect.value);
+    applyLiveSynthSettings();
   });
 }
 
@@ -209,6 +238,12 @@ function requireModelsReady() {
 const jobs = [];
 let jobCounter = 0;
 let userDictionary = {};
+/** @type {{ id: string, status: string, title: string } | null} */
+let streamJob = null;
+let streamSourceText = null;
+let lastStreamPlaybackSync = { playing: null, chunk: null };
+let streamTextChangeTimer = null;
+const STREAM_TEXT_DEBOUNCE_MS = 500;
 
 function setStatus(msg, { isError = false } = {}) {
   footerStatus.textContent = msg;
@@ -261,7 +296,6 @@ function renderJobs() {
     li.querySelector(".btn-cancel")?.addEventListener("click", () => {
       window.ttsApp.rpc("cancel_job", { jobId: job.id });
       job.status = "cancelled";
-      player.endSession(job.id, { reason: "cancelled" });
       setStatus(`Cancelled: ${job.title}`);
       renderJobs();
     });
@@ -355,10 +389,145 @@ function collectDictionary() {
 function failJob(job, message) {
   job.status = "error";
   job.error = message;
-  player.endSession(job.id, { reason: "error" });
   window.ttsApp.rpc("cancel_job", { jobId: job.id }).catch(() => {});
   setStatus(`Error: ${message}`, { isError: true });
   renderJobs();
+}
+
+function failStreamJob(message) {
+  if (streamJob) {
+    player.endSession(streamJob.id, { reason: "error" });
+    streamJob = null;
+  }
+  streamSourceText = null;
+  setStatus(`Error: ${message}`, { isError: true });
+}
+
+function isStreamActive() {
+  return Boolean(
+    streamJob?.status === "running" || player.session?.jobRunning
+  );
+}
+
+function stopStreamPlayback() {
+  if (streamJob?.status === "running") {
+    syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
+    window.ttsApp.rpc("cancel_job", { jobId: streamJob.id }).catch(() => {});
+    player.endSession(streamJob.id, { reason: "cancelled" });
+  } else if (player.session) {
+    player.reset();
+  }
+  streamJob = null;
+  streamSourceText = null;
+  lastStreamPlaybackSync = { playing: null, chunk: null };
+}
+
+function getSynthText() {
+  const cleaned = stripUnwantedChars(textInput.value).trim();
+  if (!cleaned) return null;
+  if (cleaned !== textInput.value) textInput.value = cleaned;
+  return cleaned;
+}
+
+function streamJobTitle(text) {
+  return text.slice(0, 48).replace(/\s+/g, " ") + (text.length > 48 ? "…" : "");
+}
+
+function syncStreamPlaybackControl({ playing, playbackChunkIndex } = {}) {
+  if (!streamJob || streamJob.status !== "running") return;
+
+  const isPlaying = playing ?? player.wantsStreamPlayback();
+  const chunk = playbackChunkIndex ?? player.getPlaybackChunkIndex();
+
+  if (
+    lastStreamPlaybackSync.playing === isPlaying &&
+    lastStreamPlaybackSync.chunk === chunk
+  ) {
+    return;
+  }
+  lastStreamPlaybackSync = { playing: isPlaying, chunk };
+
+  window.ttsApp
+    .rpc("set_job_playback", {
+      jobId: streamJob.id,
+      playing: isPlaying,
+      playbackChunkIndex: chunk,
+    })
+    .catch(() => {});
+}
+
+async function startStreamPlayback({ autoPlay = true } = {}) {
+  if (!requireModelsReady()) return false;
+
+  const text = getSynthText();
+  if (!text) {
+    alert("Enter some text first.");
+    return true;
+  }
+
+  if (streamJob?.status === "running") {
+    syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
+    window.ttsApp.rpc("cancel_job", { jobId: streamJob.id }).catch(() => {});
+    player.endSession(streamJob.id, { reason: "cancelled" });
+  } else if (player.session) {
+    player.reset();
+  }
+
+  const id = `stream-${++jobCounter}`;
+  const title = streamJobTitle(text);
+  streamJob = { id, status: "running", title };
+  streamSourceText = text;
+  lastStreamPlaybackSync = { playing: null, chunk: null };
+
+  player.beginSession(id, { title, autoPlayOnChunk: autoPlay });
+  setStatus(autoPlay ? `Playing: ${title}` : `Ready: ${title}`);
+
+  try {
+    await window.ttsApp.rpc("start_job", {
+      jobId: id,
+      text,
+      saveOutput: false,
+      voiceId: voiceSelect.value,
+      emotion: emotionSelect.value,
+      maxChunkChars: 350,
+    });
+    syncStreamPlaybackControl({
+      playing: autoPlay,
+      playbackChunkIndex: 1,
+    });
+  } catch (e) {
+    failStreamJob(e.message);
+  }
+  return true;
+}
+
+function handleStreamTextChange() {
+  if (streamSourceText === null && !isStreamActive() && !player.session) {
+    return;
+  }
+
+  const current = getSynthText();
+
+  if (!current) {
+    if (isStreamActive() || player.session) {
+      stopStreamPlayback();
+      setStatus("Playback stopped — text is empty");
+    }
+    return;
+  }
+
+  if (current === streamSourceText) {
+    return;
+  }
+
+  if (!isStreamActive() && !player.session) {
+    streamSourceText = null;
+    return;
+  }
+
+  const resumePlaying = player.wantsStreamPlayback();
+  setStatus("Text changed — restarting…");
+  startStreamPlayback({ autoPlay: resumePlaying });
 }
 
 async function enqueueJob(text, title) {
@@ -389,6 +558,7 @@ async function enqueueJob(text, title) {
       jobId: id,
       text: stripUnwantedChars(text),
       outputPath,
+      saveOutput: true,
       voiceId: voiceSelect.value,
       emotion: emotionSelect.value,
       maxChunkChars: 350,
@@ -401,11 +571,60 @@ async function enqueueJob(text, title) {
   }
 }
 
+function handleStreamEvent(event) {
+  if (!streamJob || event.jobId !== streamJob.id) return false;
+  if (streamJob.status === "error" || streamJob.status === "cancelled") return true;
+
+  if (event.type === "chunk_audio" && event.audioWavBase64) {
+    if (event.totalChunks) {
+      player.setStreamPlan(streamJob.id, { totalChunks: event.totalChunks });
+    }
+    player
+      .appendChunk(streamJob.id, event.audioWavBase64, {
+        chunkIndex: event.chunkIndex,
+        totalChunks: event.totalChunks,
+        duration: event.duration,
+        sampleRate: event.sampleRate,
+      })
+      .catch((e) => console.error("Chunk decode failed", e));
+  } else if (event.type === "job_complete") {
+    streamJob.status = "done";
+    player.endSession(streamJob.id, { reason: "ended" });
+    streamJob = null;
+    if (getSynthText() === streamSourceText) {
+      setStatus("Playback finished");
+    }
+  } else if (event.type === "job_error") {
+    streamJob.status = "error";
+    failStreamJob(event.message);
+  } else if (event.type === "job_cancelled") {
+    streamJob.status = "cancelled";
+    player.endSession(streamJob.id, { reason: "cancelled" });
+    streamJob = null;
+    streamSourceText = null;
+    setStatus("Playback cancelled");
+  } else if (event.type === "job_started") {
+    if (event.totalChunks) {
+      player.setStreamPlan(streamJob.id, { totalChunks: event.totalChunks });
+    }
+    setStatus(`Playing: ${streamJob.title}`);
+    syncStreamPlaybackControl({
+      playing: player.wantsStreamPlayback(),
+      playbackChunkIndex: 1,
+    });
+  } else if (event.type === "chunk_started") {
+    player.syncUi();
+  }
+  return true;
+}
+
 function handleTtsEvent(event) {
   if (event.type?.startsWith("model_download")) {
     handleModelEvent(event);
     return;
   }
+
+  if (event.jobId && handleStreamEvent(event)) return;
 
   const job = event.jobId ? getJob(event.jobId) : null;
 
@@ -427,10 +646,6 @@ function handleTtsEvent(event) {
     job.status = "running";
     job.progress = 0;
     job.totalChunks = event.totalChunks || 0;
-    player.beginSession(job.id, {
-      title: job.title,
-      estimatedTotalSec: 0,
-    });
   } else if (event.type === "chunk_started" && job.status === "running") {
     const total = event.totalChunks || job.totalChunks;
     if (total) {
@@ -441,31 +656,16 @@ function handleTtsEvent(event) {
     if (total) {
       job.progress = event.chunkIndex / total;
     }
-  } else if (event.type === "chunk_audio" && job.status === "running" && event.audioWavBase64) {
-    player
-      .appendChunk(job.id, event.audioWavBase64, {
-        chunkIndex: event.chunkIndex,
-        totalChunks: event.totalChunks,
-        duration: event.duration,
-        totalDuration: event.totalDuration,
-        sampleRate: event.sampleRate,
-      })
-      .catch((e) => console.error("Chunk decode failed", e));
   } else if (event.type === "job_complete") {
     job.status = "done";
     job.progress = 1;
     job.outputPath = event.outputPath;
-    player
-      .loadFile(job.id, event.outputPath, event.duration)
-      .then(() => player.endSession(job.id, { reason: "ended" }))
-      .catch((e) => console.error("Load output failed", e));
     setStatus(`Done: ${basename(event.outputPath)}`);
   } else if (event.type === "job_error") {
     failJob(job, event.message);
     return;
   } else if (event.type === "job_cancelled") {
     job.status = "cancelled";
-    player.endSession(job.id, { reason: "cancelled" });
     setStatus(`Cancelled: ${job.title}`);
   } else if (event.type === "warning") {
     console.warn(event.message);
@@ -534,22 +734,77 @@ async function init() {
 
   $("#btn-generate").addEventListener("click", async () => {
     if (!requireModelsReady()) return;
-    const cleaned = stripUnwantedChars(textInput.value).trim();
+    const cleaned = getSynthText();
     if (!cleaned) {
       alert("Enter some text first.");
       return;
     }
-    if (cleaned !== textInput.value) {
-      textInput.value = cleaned;
-    }
-    const title = cleaned.slice(0, 48).replace(/\s+/g, " ") + (cleaned.length > 48 ? "…" : "");
-    await enqueueJob(cleaned, title);
+    await enqueueJob(cleaned, streamJobTitle(cleaned));
   });
 
-  $("#btn-preview").addEventListener("click", async () => {
+  player.onPlayRequest = () => {
+    const text = getSynthText();
+    if (
+      text &&
+      streamSourceText !== null &&
+      text !== streamSourceText
+    ) {
+      startStreamPlayback({ autoPlay: true });
+      return true;
+    }
+    if (player.session?.jobRunning || player.knownDurationSec > 0) {
+      return false;
+    }
+    startStreamPlayback();
+    return true;
+  };
+  player.onPlaybackControl = ({ playing, playbackChunkIndex }) => {
+    syncStreamPlaybackControl({ playing, playbackChunkIndex });
+  };
+  player.onStateChange = (state) => {
+    if (state === "buffering" && streamJob?.status === "running") {
+      setStatus(`Buffering: ${streamJob.title}…`);
+    }
+  };
+  textInput.addEventListener("input", () => {
+    clearTimeout(streamTextChangeTimer);
+    streamTextChangeTimer = setTimeout(
+      handleStreamTextChange,
+      STREAM_TEXT_DEBOUNCE_MS
+    );
+  });
+  player.syncUi();
+
+  function syncPreviewButton() {
+    if (previewPlaying) {
+      btnPreview.textContent = "Stop sample";
+      btnPreview.disabled = false;
+    } else if (previewLoading) {
+      btnPreview.textContent = "Play sample";
+      btnPreview.disabled = true;
+    } else {
+      btnPreview.textContent = "Play sample";
+      btnPreview.disabled = false;
+    }
+  }
+
+  btnPreview.addEventListener("click", async () => {
     if (!requireModelsReady()) return;
-    const btn = $("#btn-preview");
-    btn.disabled = true;
+
+    if (previewPlaying) {
+      previewStoppedByUser = true;
+      previewPlaying = false;
+      player.stopPreview();
+      setStatus("Preview stopped");
+      syncPreviewButton();
+      return;
+    }
+
+    if (previewLoading) return;
+
+    previewStoppedByUser = false;
+    previewLoading = true;
+    syncPreviewButton();
     setStatus("Generating voice sample…");
     try {
       const data = await window.ttsApp.rpc("preview_voice", {
@@ -559,23 +814,22 @@ async function init() {
       if (!data?.audioWavBase64) {
         throw new Error("No audio returned from preview");
       }
+      previewLoading = false;
+      previewPlaying = true;
       setStatus("Playing sample…");
-      $("#btn-stop-preview").disabled = false;
+      syncPreviewButton();
       await player.playPreview(data.audioWavBase64);
-      $("#btn-stop-preview").disabled = true;
-      setStatus(`Sample (${data.duration.toFixed(1)}s)`);
+      if (!previewStoppedByUser) {
+        setStatus(`Sample (${data.duration.toFixed(1)}s)`);
+      }
     } catch (e) {
       console.error(e);
       setStatus(`Preview failed: ${e.message}`);
     } finally {
-      btn.disabled = false;
+      previewLoading = false;
+      previewPlaying = false;
+      syncPreviewButton();
     }
-  });
-
-  $("#btn-stop-preview").addEventListener("click", () => {
-    player.stopPreview();
-    $("#btn-stop-preview").disabled = true;
-    setStatus("Preview stopped");
   });
 
   navButtons.forEach((btn) => {

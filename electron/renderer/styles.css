@@ -215,6 +215,24 @@ textarea {
   color: var(--muted);
 }
 
+.voice-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.voice-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-row #btn-preview {
+  flex-shrink: 0;
+  white-space: nowrap;
+  min-width: 8.75rem;
+  text-align: center;
+}
+
 .row {
   display: flex;
   gap: 0.5rem;
@@ -450,10 +468,20 @@ textarea {
   height: 0.35rem;
 }
 
-.player-time {
+.player-time,
+.player-chunks {
   flex-shrink: 0;
   font-size: 0.75rem;
   color: var(--muted);
+}
+
+.player-chunks {
+  min-width: 3.5rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.player-time {
   font-variant-numeric: tabular-nums;
   min-width: 7.5rem;
   text-align: right;

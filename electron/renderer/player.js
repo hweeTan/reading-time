@@ -11,15 +11,26 @@ class AudioPlayer {
     this.scheduledSources = [];
     this.previewSource = null;
     this.isMuted = true;
-    this.state = "idle"; // idle | playing | paused | ended
+    this.state = "idle"; // idle | playing | paused | buffering | ended
+    this.BUFFER_EDGE_SEC = 0.05;
     this.playheadSec = 0;
     this.knownDurationSec = 0;
     this.totalDurationSec = 0;
     this.isScrubbing = false;
     this.rafId = 0;
+    /** @type {{ playheadSec: number, ctxTime: number } | null} */
+    this._playbackAnchor = null;
+    /** End of the Web Audio pipeline (session timeline + ctx time). */
+    this._scheduleTimelineSec = null;
+    this._scheduleCtxTime = null;
     this.onStateChange = null;
+    this.onPlayRequest = null;
+    this.onPlaybackControl = null;
 
-    ui.btnPlay.addEventListener("click", () => this.togglePlay());
+    ui.btnPlay.addEventListener("click", () => {
+      if (this.onPlayRequest?.()) return;
+      this.togglePlay();
+    });
     ui.btnMute.addEventListener("click", () => this.setMuted(!this.isMuted));
     ui.seek.addEventListener("input", () => {
       this.isScrubbing = true;
@@ -87,11 +98,199 @@ class AudioPlayer {
     return `${m}:${String(s).padStart(2, "0")}`;
   }
 
-  getPlayheadSec() {
-    if (this.state === "playing" && this.ctx && this.anchorCtxTime != null) {
+  getBufferedEndSec() {
+    return this.knownDurationSec;
+  }
+
+  isStreamingSession() {
+    return this.session?.mode === "streaming" && this.session?.jobRunning;
+  }
+
+  getStreamingPlayheadCap() {
+    return Math.max(0, this.getBufferedEndSec() - 0.001);
+  }
+
+  getClockPlayheadSec() {
+    if (this.state !== "playing" || !this.ctx) {
+      return this.playheadSec;
+    }
+    if (this.isStreamingSession() && this._playbackAnchor) {
+      const elapsed = this.ctx.currentTime - this._playbackAnchor.ctxTime;
+      return this._playbackAnchor.playheadSec + Math.max(0, elapsed);
+    }
+    if (this.anchorCtxTime != null) {
       return this.anchorPlayhead + (this.ctx.currentTime - this.anchorCtxTime);
     }
     return this.playheadSec;
+  }
+
+  getPlayheadSec() {
+    let ph = this.getClockPlayheadSec();
+    if (this.state === "playing" && this.isStreamingSession()) {
+      const cap = this.getStreamingPlayheadCap();
+      if (ph > cap) ph = cap;
+    }
+    return ph;
+  }
+
+  setPlaybackAnchor(playheadSec) {
+    if (!this.ctx) return;
+    const bufEnd = this.getBufferedEndSec();
+    const ph =
+      bufEnd > 0
+        ? Math.max(0, Math.min(playheadSec, bufEnd - 0.001))
+        : Math.max(0, playheadSec);
+    this.playheadSec = ph;
+    this.anchorPlayhead = ph;
+    this.anchorCtxTime = this.ctx.currentTime;
+    this._playbackAnchor = { playheadSec: ph, ctxTime: this.ctx.currentTime };
+  }
+
+  clearPlaybackAnchor() {
+    this._playbackAnchor = null;
+    this.anchorCtxTime = null;
+  }
+
+  clearSchedulePipeline() {
+    this._scheduleTimelineSec = null;
+    this._scheduleCtxTime = null;
+  }
+
+  /** Session timeline position to use when (re)starting playback. */
+  getAudioPlayheadSec() {
+    if (
+      this._scheduleTimelineSec != null &&
+      this.state === "playing" &&
+      this.scheduledSources.length > 0
+    ) {
+      const clockPh = this.getClockPlayheadSec();
+      if (clockPh > this._scheduleTimelineSec + 0.15) {
+        return this._scheduleTimelineSec;
+      }
+    }
+    return this.getPlayheadSec();
+  }
+
+  checkStreamBufferUnderrun() {
+    if (this.state !== "playing") return;
+    if (!this.isStreamingSession()) return;
+
+    const bufEnd = this.getBufferedEndSec();
+    if (bufEnd <= 0) {
+      this.enterBufferWait();
+      return;
+    }
+
+    const ph = this.getPlayheadSec();
+    if (this.scheduledSources.length === 0) {
+      if (ph >= bufEnd - this.BUFFER_EDGE_SEC) {
+        this.enterBufferWait();
+      } else {
+        this.scheduleFrom(this.getAudioPlayheadSec());
+      }
+    }
+  }
+
+  syncPlayheadClock(playheadSec = this.playheadSec) {
+    this.setPlaybackAnchor(playheadSec);
+  }
+
+  wantsStreamPlayback() {
+    return (
+      this.state === "playing" ||
+      (this.state === "buffering" && this.session?.wantsPlay)
+    );
+  }
+
+  getPlaybackChunkIndex() {
+    if (!this.session?.chunks.length) return 0;
+    const ph = this.getPlayheadSec();
+    let index = this.session.chunks[0].index;
+    for (const ch of this.session.chunks) {
+      if (ph >= ch.startSec - 0.01) index = ch.index;
+    }
+    if (this.session.mode === "file" && index === 0) {
+      return 1;
+    }
+    return index;
+  }
+
+  getChunkProgress() {
+    if (!this.session) return null;
+    const loaded = this.session.chunks?.length ?? 0;
+    const total =
+      this.session.totalChunks ||
+      (this.session.mode === "file" && loaded > 0 ? 1 : 0);
+    if (loaded === 0 && total === 0) return null;
+    const current = loaded > 0 ? this.getPlaybackChunkIndex() : 0;
+    return { current, loaded, total };
+  }
+
+  formatChunkProgress() {
+    const p = this.getChunkProgress();
+    if (!p) return "";
+    const totalStr = p.total > 0 ? String(p.total) : "?";
+    return `${p.current}/${p.loaded}/${totalStr}`;
+  }
+
+  notifyPlaybackControl() {
+    if (!this.session?.jobRunning) return;
+    this.onPlaybackControl?.({
+      playing: this.wantsStreamPlayback(),
+      playbackChunkIndex: this.getPlaybackChunkIndex(),
+    });
+  }
+
+  enterBufferWait() {
+    if (this.state !== "playing" || this.session?.mode !== "streaming") return;
+    if (!this.session?.jobRunning) return;
+
+    const bufEnd = this.getBufferedEndSec();
+    const ph = this.getClockPlayheadSec();
+    this.playheadSec =
+      bufEnd > 0 ? Math.max(0, Math.min(ph, bufEnd - 0.001)) : 0;
+    this.stopScheduled();
+    this.clearSchedulePipeline();
+    this.clearPlaybackAnchor();
+    this.anchorPlayhead = this.playheadSec;
+    this.state = "buffering";
+    if (this.session) this.session.wantsPlay = true;
+    this.notifyPlaybackControl();
+    this.emitState();
+  }
+
+  async resumeAfterBuffer() {
+    if (!this.session?.wantsPlay || this.knownDurationSec <= 0) return;
+    await this.resumeContext();
+    this.state = "playing";
+    this.syncPlayheadClock(this.playheadSec);
+    this.scheduleFrom(this.playheadSec);
+    this.startUiLoop();
+    this.notifyPlaybackControl();
+    this.emitState();
+  }
+
+  /** Estimate full length from average duration of received chunks × total chunk count. */
+  updateEstimatedTotal() {
+    const totalChunks = this.session?.totalChunks;
+    const received = this.session?.chunks?.length ?? 0;
+    if (!totalChunks || received === 0) return;
+
+    const avgSecPerChunk = this.knownDurationSec / received;
+    this.totalDurationSec = avgSecPerChunk * totalChunks;
+
+    if (received >= totalChunks) {
+      this.totalDurationSec = this.knownDurationSec;
+    }
+  }
+
+  setStreamPlan(jobId, { totalChunks } = {}) {
+    if (!this.session || this.session.jobId !== jobId) return;
+    if (totalChunks > 0) {
+      this.session.totalChunks = totalChunks;
+      this.updateEstimatedTotal();
+      this.emitState();
+    }
   }
 
   emitState() {
@@ -99,59 +298,118 @@ class AudioPlayer {
     this.syncUi();
   }
 
+  getSeekMaxSec() {
+    const hasChunkEstimate =
+      this.session?.mode === "streaming" &&
+      this.session.totalChunks > 0 &&
+      this.totalDurationSec > 0;
+    const displayTotal = hasChunkEstimate
+      ? this.totalDurationSec
+      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001);
+    return Math.max(displayTotal, this.knownDurationSec, 0.001);
+  }
+
+  /** Cap seek thumb / playhead to received audio during streaming. */
+  getSeekValueSec(playheadSec = this.getPlayheadSec()) {
+    const seekMax = this.getSeekMaxSec();
+    let ph = Math.min(Math.max(0, playheadSec), seekMax);
+    if (this.isStreamingSession() && this.knownDurationSec > 0) {
+      ph = Math.min(ph, this.getStreamingPlayheadCap());
+    }
+    return ph;
+  }
+
   syncUi() {
-    const { btnPlay, seek, timeLabel } = this.ui;
+    if (this.state === "playing") {
+      this.checkStreamBufferUnderrun();
+    }
+    const { btnPlay, seek, timeLabel, chunksLabel } = this.ui;
     const playhead = this.getPlayheadSec();
-    const total = Math.max(this.totalDurationSec, this.knownDurationSec, 0.001);
+    const hasChunkEstimate =
+      this.session?.mode === "streaming" &&
+      this.session.totalChunks > 0 &&
+      this.totalDurationSec > 0;
+    const displayTotal = hasChunkEstimate
+      ? this.totalDurationSec
+      : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001);
+    const seekMax = this.getSeekMaxSec();
     const atEnd =
       this.knownDurationSec > 0 && playhead >= this.knownDurationSec - 0.05;
 
-    btnPlay.disabled = !this.session || this.knownDurationSec <= 0;
-    btnPlay.textContent = this.state === "playing" ? "⏸" : "▶";
-    btnPlay.setAttribute(
-      "aria-label",
-      this.state === "playing" ? "Pause" : "Play"
-    );
+    btnPlay.disabled = false;
+    const showPause = this.state === "playing" || this.state === "buffering";
+    btnPlay.textContent = showPause ? "⏸" : "▶";
+    btnPlay.setAttribute("aria-label", showPause ? "Pause" : "Play");
+
+    const displayPlayhead = this.getSeekValueSec(playhead);
 
     if (!this.isScrubbing) {
-      seek.max = String(total);
-      seek.value = String(Math.min(playhead, total));
-      seek.disabled = this.knownDurationSec <= 0;
+      seek.max = String(seekMax);
+      seek.value = String(displayPlayhead);
+      seek.disabled = !hasChunkEstimate && this.knownDurationSec <= 0;
     }
 
     const totalLabel =
-      this.session?.mode === "streaming" && this.totalDurationSec > this.knownDurationSec
-        ? `${this.formatTime(playhead)} / ${this.formatTime(this.knownDurationSec)} (${this.formatTime(this.totalDurationSec)} est.)`
-        : `${this.formatTime(playhead)} / ${this.formatTime(total)}`;
+      !hasChunkEstimate && this.knownDurationSec <= 0
+        ? `${this.formatTime(playhead)} / —`
+        : `${this.formatTime(displayPlayhead)} / ${this.formatTime(displayTotal)}`;
 
     timeLabel.textContent = totalLabel;
+
+    if (chunksLabel) {
+      const progress = this.formatChunkProgress();
+      chunksLabel.textContent = progress;
+      chunksLabel.hidden = !progress;
+    }
 
     if (this.state === "ended" || (atEnd && this.session?.mode === "file")) {
       btnPlay.textContent = "▶";
     }
   }
 
+  stopUiLoop() {
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+    }
+  }
+
   startUiLoop() {
+    this.stopUiLoop();
     const loop = () => {
+      if (this.state !== "playing" && this.state !== "buffering") {
+        this.rafId = 0;
+        return;
+      }
       if (this.state === "playing") {
+        this.checkStreamBufferUnderrun();
         const ph = this.getPlayheadSec();
+        const chunkIdx = this.getPlaybackChunkIndex();
+        if (chunkIdx !== this._lastNotifiedChunk) {
+          this._lastNotifiedChunk = chunkIdx;
+          this.notifyPlaybackControl();
+        }
         if (ph >= this.knownDurationSec - 0.02) {
           if (this.session?.mode === "file") {
             this.pause();
             this.playheadSec = this.knownDurationSec;
             this.state = "ended";
             this.emitState();
-          } else if (!this.session?.jobRunning) {
+            this.rafId = 0;
+            return;
+          }
+          if (!this.session?.jobRunning) {
             this.pause();
             this.state = "paused";
             this.emitState();
+            this.rafId = 0;
+            return;
           }
         }
-        this.syncUi();
       }
+      this.syncUi();
       this.rafId = requestAnimationFrame(loop);
     };
-    cancelAnimationFrame(this.rafId);
     this.rafId = requestAnimationFrame(loop);
   }
 
@@ -177,6 +435,7 @@ class AudioPlayer {
       }
     }
     this.scheduledSources = [];
+    this.clearSchedulePipeline();
   }
 
   stopPreview() {
@@ -195,7 +454,10 @@ class AudioPlayer {
     }
   }
 
-  beginSession(jobId, { title = "", estimatedTotalSec = 0 } = {}) {
+  beginSession(
+    jobId,
+    { title = "", estimatedTotalSec = 0, autoPlayOnChunk = false } = {}
+  ) {
     this.stopPreview();
     this.stopScheduled();
     this.session = {
@@ -203,7 +465,10 @@ class AudioPlayer {
       title,
       mode: "streaming",
       jobRunning: true,
+      autoPlayOnChunk,
+      wantsPlay: autoPlayOnChunk,
       chunks: [],
+      totalChunks: 0,
       sampleRate: 24000,
     };
     this.playheadSec = 0;
@@ -212,6 +477,8 @@ class AudioPlayer {
     this.state = "idle";
     this.anchorCtxTime = null;
     this.anchorPlayhead = 0;
+    this._lastNotifiedChunk = 0;
+    this.clearPlaybackAnchor();
     this.emitState();
   }
 
@@ -229,49 +496,91 @@ class AudioPlayer {
       durationSec,
     });
     if (meta.sampleRate) this.session.sampleRate = meta.sampleRate;
+    if (meta.totalChunks > 0) {
+      this.session.totalChunks = meta.totalChunks;
+    }
     this.knownDurationSec += durationSec;
+    this.updateEstimatedTotal();
 
-    if (meta.totalDuration && meta.totalDuration > this.knownDurationSec) {
-      this.totalDurationSec = meta.totalDuration;
-    } else if (meta.totalChunks && meta.chunkIndex) {
-      this.totalDurationSec = (this.knownDurationSec / meta.chunkIndex) * meta.totalChunks;
+    const ph = this.getPlayheadSec();
+    const atLiveEdge =
+      this.state === "playing" && ph >= startSec - this.BUFFER_EDGE_SEC;
+    const resumeFromBuffer =
+      this.state === "buffering" && this.session.wantsPlay;
+
+    if (resumeFromBuffer) {
+      await this.resumeAfterBuffer();
+    } else if (atLiveEdge && this.session.wantsPlay) {
+      await this.resumeContext();
+      this.state = "playing";
+      const newChunk = this.session.chunks[this.session.chunks.length - 1];
+      if (
+        this.scheduledSources.length > 0 &&
+        this._scheduleCtxTime != null &&
+        this._scheduleTimelineSec != null
+      ) {
+        this.appendChunkToPipeline(newChunk);
+      } else {
+        const resumeAt =
+          this._scheduleTimelineSec != null
+            ? Math.min(this._scheduleTimelineSec, startSec)
+            : Math.min(this.getAudioPlayheadSec(), startSec);
+        this.scheduleFrom(resumeAt);
+      }
+      this.startUiLoop();
+    } else if (this.session.autoPlayOnChunk && this.session.chunks.length === 1) {
+      this.session.autoPlayOnChunk = false;
+      this.session.wantsPlay = true;
+      this.play().catch((e) => console.error("Auto-play failed", e));
     }
 
-    const wasAtLiveEdge =
-      this.state === "playing" &&
-      this.getPlayheadSec() >= startSec - 0.15;
-
-    if (wasAtLiveEdge) {
-      this.scheduleChunkAt(this.session.chunks[this.session.chunks.length - 1], 0);
-    }
-
+    this.notifyPlaybackControl();
     this.emitState();
   }
 
-  scheduleChunkAt(chunk, offsetInChunk) {
-    const ctx = this.ensureContext();
-    const dur = chunk.durationSec - offsetInChunk;
-    if (dur <= 0) return;
-
-    const src = ctx.createBufferSource();
-    src.buffer = chunk.buffer;
-    src.connect(this.sessionGain);
-    const when = ctx.currentTime;
-    src.start(when, offsetInChunk, dur);
-    this.scheduledSources.push(src);
-
+  _bindScheduledSource(src) {
     src.onended = () => {
       const idx = this.scheduledSources.indexOf(src);
       if (idx >= 0) this.scheduledSources.splice(idx, 1);
+      if (this.state !== "playing") return;
       if (
-        this.state === "playing" &&
         this.scheduledSources.length === 0 &&
-        this.session?.jobRunning &&
-        this.getPlayheadSec() >= this.knownDurationSec - 0.1
+        this._scheduleTimelineSec != null
       ) {
-        /* wait for more chunks */
+        this.playheadSec = this._scheduleTimelineSec;
+        this.syncPlayheadClock(this.playheadSec);
       }
+      this.checkStreamBufferUnderrun();
     };
+  }
+
+  scheduleChunkPortion(ch, timelineSec, ctxWhen) {
+    const offset = Math.max(0, timelineSec - ch.startSec);
+    const dur = ch.durationSec - offset;
+    if (dur <= 0.001) return null;
+
+    const ctx = this.ensureContext();
+    const src = ctx.createBufferSource();
+    src.buffer = ch.buffer;
+    src.connect(this.sessionGain);
+    src.start(ctxWhen, offset, dur);
+    this.scheduledSources.push(src);
+    this._bindScheduledSource(src);
+    this._scheduleCtxTime = ctxWhen + dur;
+    this._scheduleTimelineSec = ch.startSec + ch.durationSec;
+    return src;
+  }
+
+  appendChunkToPipeline(ch) {
+    if (this._scheduleTimelineSec == null || this._scheduleCtxTime == null) {
+      this.scheduleFrom(ch.startSec);
+      return;
+    }
+    if (ch.startSec + ch.durationSec <= this._scheduleTimelineSec + 0.0001) {
+      return;
+    }
+    const timelineSec = Math.max(ch.startSec, this._scheduleTimelineSec);
+    this.scheduleChunkPortion(ch, timelineSec, this._scheduleCtxTime);
   }
 
   scheduleFrom(playheadSec) {
@@ -279,8 +588,15 @@ class AudioPlayer {
     if (!this.session?.chunks.length) return;
 
     const ctx = this.ensureContext();
+    const bufEnd = this.getBufferedEndSec();
+    const startPh =
+      bufEnd > 0
+        ? Math.max(0, Math.min(playheadSec, bufEnd - 0.001))
+        : Math.max(0, playheadSec);
+    this.setPlaybackAnchor(startPh);
+
     let when = ctx.currentTime;
-    let t = playheadSec;
+    let t = startPh;
 
     for (const ch of this.session.chunks) {
       const chEnd = ch.startSec + ch.durationSec;
@@ -295,51 +611,81 @@ class AudioPlayer {
       src.connect(this.sessionGain);
       src.start(when, offset, dur);
       this.scheduledSources.push(src);
+      this._bindScheduledSource(src);
       when += dur;
       t = ch.startSec + ch.durationSec;
+    }
+    if (t > startPh + 0.0001) {
+      this._scheduleCtxTime = when;
+      this._scheduleTimelineSec = t;
     }
   }
 
   async play() {
-    if (!this.session || this.knownDurationSec <= 0) return;
+    if (!this.session) return;
     await this.resumeContext();
     this.stopPreview();
+
+    if (this.session) this.session.wantsPlay = true;
+
+    if (this.knownDurationSec <= 0) {
+      this.state = "buffering";
+      this.playheadSec = 0;
+      this.clearPlaybackAnchor();
+      this.startUiLoop();
+      this.notifyPlaybackControl();
+      this.emitState();
+      return;
+    }
 
     let ph = this.playheadSec;
     if (ph >= this.knownDurationSec - 0.05) ph = 0;
 
-    this.playheadSec = ph;
-    this.anchorPlayhead = ph;
-    this.anchorCtxTime = this.ctx.currentTime;
     this.state = "playing";
-    this.scheduleFrom(ph);
+    this.syncPlayheadClock(ph);
+    this.scheduleFrom(this.getAudioPlayheadSec());
     this.startUiLoop();
+    this.notifyPlaybackControl();
     this.emitState();
   }
 
   pause() {
-    if (this.state === "playing") {
+    if (this.state === "playing" || this.state === "buffering") {
       this.playheadSec = this.getPlayheadSec();
     }
     this.stopScheduled();
     this.state = "paused";
-    this.anchorCtxTime = null;
+    this.clearPlaybackAnchor();
+    if (this.session) this.session.wantsPlay = false;
+    this.stopUiLoop();
+    this.notifyPlaybackControl();
     this.emitState();
   }
 
   togglePlay() {
-    if (this.state === "playing") this.pause();
+    if (this.state === "playing" || this.state === "buffering") this.pause();
     else this.play();
   }
 
   seek(sec) {
-    const max = Math.max(this.knownDurationSec, 0);
-    this.playheadSec = Math.max(0, Math.min(sec, max));
-    if (this.state === "playing") {
-      this.anchorPlayhead = this.playheadSec;
-      this.anchorCtxTime = this.ctx.currentTime;
-      this.scheduleFrom(this.playheadSec);
+    const max = this.getSeekMaxSec();
+    this.playheadSec = this.getSeekValueSec(Math.max(0, Math.min(sec, max)));
+    if (this.state === "playing" || this.state === "buffering") {
+      this.ensureContext();
+      if (this.session) this.session.wantsPlay = true;
+      if (this.playheadSec < this.knownDurationSec - this.BUFFER_EDGE_SEC) {
+        this.state = "playing";
+        this.scheduleFrom(this.getAudioPlayheadSec());
+        this.startUiLoop();
+      } else {
+        this.stopScheduled();
+        this.state = "buffering";
+        this.clearPlaybackAnchor();
+        this.anchorPlayhead = this.playheadSec;
+        this.startUiLoop();
+      }
     }
+    this.notifyPlaybackControl();
     this.syncUi();
   }
 
@@ -369,6 +715,9 @@ class AudioPlayer {
   endSession(jobId, { reason = "ended" } = {}) {
     if (this.session?.jobId !== jobId) return;
     this.session.jobRunning = false;
+    if (reason === "ended" && this.knownDurationSec > 0) {
+      this.totalDurationSec = this.knownDurationSec;
+    }
     if (reason === "error" || reason === "cancelled") {
       this.stopScheduled();
       this.stopPreview();
@@ -400,6 +749,7 @@ class AudioPlayer {
   }
 
   reset() {
+    this.stopUiLoop();
     this.pause();
     this.stopPreview();
     this.session = null;
@@ -422,6 +772,7 @@ function createAudioPlayer() {
     btnPlay: document.getElementById("player-play"),
     seek: document.getElementById("player-seek"),
     timeLabel: document.getElementById("player-time"),
+    chunksLabel: document.getElementById("player-chunks"),
     btnMute,
     muteIcon: btnMute?.querySelector(".mute-icon path"),
     muteLabel: btnMute?.querySelector(".mute-label"),

@@ -45,10 +45,46 @@ class SynthesisConfig:
     chunk_crossfade_p: float = CHUNK_CROSSFADE_P
 
 
+STREAM_LOOKAHEAD_CHUNKS = 4
+
+
+def emotion_to_tag(emotion: str) -> str | None:
+    """Map UI emotion id to VieNeu emotion_tag (see vieneu.standard.VieNeuTTS)."""
+    return "<|emotion_0|>" if emotion == "natural" else None
+
+
 @dataclass
 class JobState:
     job_id: str
+    voice_id: str = DEFAULT_VOICE_ID
+    emotion: str = EMOTION
     cancel: threading.Event = field(default_factory=threading.Event)
+    throttled: bool = False
+    paused: bool = False
+    playback_chunk: int = 1
+    lookahead: int = STREAM_LOOKAHEAD_CHUNKS
+    _wake: threading.Condition = field(default_factory=threading.Condition)
+
+    def set_playback(
+        self, *, playing: bool, playback_chunk: int | None = None
+    ) -> None:
+        with self._wake:
+            self.paused = not playing
+            if playback_chunk is not None:
+                self.playback_chunk = max(1, int(playback_chunk))
+            self._wake.notify_all()
+
+    def wait_for_chunk(self, chunk_index: int) -> bool:
+        """Block until chunk_index may be synthesized, or cancel."""
+        with self._wake:
+            while True:
+                if self.cancel.is_set():
+                    return False
+                if not self.throttled:
+                    return True
+                if not self.paused and chunk_index <= self.playback_chunk + self.lookahead:
+                    return True
+                self._wake.wait(timeout=0.25)
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -156,22 +192,60 @@ class TTSEngine:
         job = self._jobs.get(job_id)
         if job:
             job.cancel.set()
+            with job._wake:
+                job._wake.notify_all()
+
+    def set_job_playback(
+        self,
+        job_id: str,
+        *,
+        playing: bool,
+        playback_chunk: int | None = None,
+    ) -> None:
+        job = self._jobs.get(job_id)
+        if not job or not job.throttled:
+            return
+        job.set_playback(playing=playing, playback_chunk=playback_chunk)
+
+    def set_job_synth_config(
+        self,
+        job_id: str,
+        *,
+        voice_id: str | None = None,
+        emotion: str | None = None,
+    ) -> None:
+        job = self._jobs.get(job_id)
+        if not job:
+            return
+        with job._wake:
+            if voice_id is not None:
+                job.voice_id = voice_id
+            if emotion is not None:
+                job.emotion = emotion
+            job._wake.notify_all()
 
     def synthesize(
         self,
         job_id: str,
         text: str,
-        output_path: Path,
+        output_path: Path | None,
         config: SynthesisConfig,
         on_event: EventCallback,
+        *,
+        save_output: bool = True,
     ) -> None:
-        job = JobState(job_id=job_id)
+        job = JobState(
+            job_id=job_id,
+            voice_id=config.voice_id,
+            emotion=config.emotion,
+            throttled=not save_output,
+            paused=not save_output,
+        )
         self._jobs[job_id] = job
 
         try:
             self.ensure_model(lambda e: on_event({**e, "jobId": job_id}))
             assert self._tts is not None
-            voice = self._resolve_voice(config.voice_id)
             text_chunks, warnings = self._text_chunks(text, config.max_chunk_chars)
             for w in warnings:
                 on_event({"type": "warning", "jobId": job_id, "message": w})
@@ -185,8 +259,7 @@ class TTSEngine:
                 }
             )
 
-            chunk_kw = {
-                "voice": voice,
+            chunk_kw_base = {
                 "max_chars": config.max_chunk_chars + 64,
                 "skip_normalize": True,
                 "silence_p": 0.0,
@@ -196,9 +269,13 @@ class TTSEngine:
             total_duration = 0.0
 
             for idx, chunk_text in enumerate(text_chunks, start=1):
-                if job.cancel.is_set():
+                if not job.wait_for_chunk(idx):
                     on_event({"type": "job_cancelled", "jobId": job_id})
                     return
+
+                with job._wake:
+                    voice_id = job.voice_id
+                    emotion = job.emotion
 
                 on_event(
                     {
@@ -207,14 +284,19 @@ class TTSEngine:
                         "chunkIndex": idx,
                         "totalChunks": len(text_chunks),
                         "charCount": len(chunk_text),
+                        "voiceId": voice_id,
+                        "emotion": emotion,
                     }
                 )
 
                 try:
+                    voice = self._resolve_voice(voice_id)
                     wav = np.asarray(
                         self._tts.infer(
                             prepare_chunk_for_tts(chunk_text, self._tts.normalizer),
-                            **chunk_kw,
+                            voice=voice,
+                            emotion_tag=emotion_to_tag(emotion),
+                            **chunk_kw_base,
                         ),
                         dtype=np.float32,
                     )
@@ -255,29 +337,31 @@ class TTSEngine:
                 on_event({"type": "job_cancelled", "jobId": job_id})
                 return
 
-            from vieneu_utils.core_utils import join_audio_chunks
-
             if not chunk_wavs:
                 raise ValueError("No audio generated (empty text?)")
 
-            final_wav = join_audio_chunks(
-                chunk_wavs,
-                self._tts.sample_rate,
-                config.chunk_silence_p,
-                config.chunk_crossfade_p,
-            )
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            self._tts.save(final_wav, str(output_path))
+            complete: dict[str, Any] = {
+                "type": "job_complete",
+                "jobId": job_id,
+                "duration": total_duration,
+            }
+            if save_output:
+                from vieneu_utils.core_utils import join_audio_chunks
 
-            on_event(
-                {
-                    "type": "job_complete",
-                    "jobId": job_id,
-                    "outputPath": str(output_path),
-                    "duration": total_duration,
-                }
-            )
+                final_wav = join_audio_chunks(
+                    chunk_wavs,
+                    self._tts.sample_rate,
+                    config.chunk_silence_p,
+                    config.chunk_crossfade_p,
+                )
+                if output_path is None:
+                    raise ValueError("output_path is required when save_output=True")
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                self._tts.save(final_wav, str(output_path))
+                complete["outputPath"] = str(output_path)
+
+            on_event(complete)
         except Exception as exc:
             on_event(
                 {

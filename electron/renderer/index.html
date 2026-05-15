@@ -73,10 +73,13 @@
 
       <section class="panel panel-voice">
         <h2>Voice &amp; output</h2>
-        <label class="field">
+        <div class="field field-voice">
           <span>Voice</span>
-          <select id="voice-select"></select>
-        </label>
+          <div class="voice-row">
+            <select id="voice-select"></select>
+            <button type="button" id="btn-preview" class="btn secondary">Play sample</button>
+          </div>
+        </div>
         <label class="field">
           <span>Emotion</span>
           <select id="emotion-select">
@@ -84,10 +87,6 @@
             <option value="natural">Natural</option>
           </select>
         </label>
-        <div class="row">
-          <button type="button" id="btn-preview" class="btn secondary">Play sample</button>
-          <button type="button" id="btn-stop-preview" class="btn ghost" disabled>Stop</button>
-        </div>
         <label class="field">
           <span>Output folder</span>
           <div class="row">
@@ -95,7 +94,7 @@
             <button type="button" id="btn-output-dir" class="btn secondary">Browse…</button>
           </div>
         </label>
-        <button type="button" id="btn-generate" class="btn primary">Add to queue &amp; generate</button>
+        <button type="button" id="btn-generate" class="btn primary">Add to queue &amp; generate file</button>
       </section>
 
       <section class="panel panel-queue">
@@ -130,7 +129,6 @@
           id="player-play"
           class="player-btn"
           aria-label="Play"
-          disabled
         >
           ▶
         </button>
@@ -146,6 +144,7 @@
           aria-label="Seek"
         />
         <span id="player-time" class="player-time">0:00 / 0:00</span>
+        <span id="player-chunks" class="player-chunks" aria-label="Chunk progress"></span>
         <button
           type="button"
           id="player-mute"

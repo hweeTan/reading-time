@@ -54,14 +54,24 @@ def _run_job(
     req_id: str,
     job_id: str,
     text: str,
-    output_path: str,
+    output_path: str | None,
     config: SynthesisConfig,
+    *,
+    save_output: bool,
 ) -> None:
     def on_event(event: dict) -> None:
         _emit({"event": event})
 
     try:
-        _engine.synthesize(job_id, text, Path(output_path), config, on_event)
+        path = Path(output_path) if output_path else None
+        _engine.synthesize(
+            job_id,
+            text,
+            path,
+            config,
+            on_event,
+            save_output=save_output,
+        )
         _respond(req_id, {"jobId": job_id, "status": "finished"})
     except Exception as exc:
         _respond(req_id, error=str(exc))
@@ -160,9 +170,29 @@ def _handle(req: dict) -> None:
             _engine.cancel_job(req["jobId"])
             _respond(req_id, {"jobId": req["jobId"]})
 
+        elif cmd == "set_job_playback":
+            _engine.set_job_playback(
+                req["jobId"],
+                playing=bool(req.get("playing", False)),
+                playback_chunk=req.get("playbackChunkIndex"),
+            )
+            _respond(req_id, {"jobId": req["jobId"]})
+
+        elif cmd == "set_job_synth_config":
+            _engine.set_job_synth_config(
+                req["jobId"],
+                voice_id=req.get("voiceId"),
+                emotion=req.get("emotion"),
+            )
+            _respond(req_id, {"jobId": req["jobId"]})
+
         elif cmd == "start_job":
             _require_models()
             job_id = req["jobId"]
+            save_output = bool(req.get("saveOutput", True))
+            output_path = req.get("outputPath")
+            if save_output and not output_path:
+                raise ValueError("outputPath is required when saveOutput is true")
             config = SynthesisConfig(
                 voice_id=req.get("voiceId", "Doan"),
                 emotion=req.get("emotion", "storytelling"),
@@ -176,8 +206,9 @@ def _handle(req: dict) -> None:
                 req_id,
                 job_id,
                 req["text"],
-                req["outputPath"],
+                output_path,
                 config,
+                save_output=save_output,
             )
 
         else:
