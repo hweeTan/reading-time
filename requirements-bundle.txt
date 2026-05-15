@@ -1,0 +1,13 @@
+# Minimal deps for the Electron worker bundle (see scripts/prepare-bundle.sh).
+# vieneu is installed separately with --no-deps to avoid gradio/librosa/perth.
+llama-cpp-python==0.3.16
+onnxruntime>=1.20.0
+numpy
+soundfile
+huggingface_hub>=0.26.0
+tqdm
+PyYAML
+requests
+sea-g2p>=0.7.5
+python-docx>=1.1.0
+pypdf>=4.0.0

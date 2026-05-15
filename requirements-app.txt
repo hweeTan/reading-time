@@ -1,3 +1,5 @@
+# Dev/CLI app extras (full TTS stack: use requirements.txt for vieneu + sounddevice).
+# The Electron bundle uses requirements-bundle.txt via scripts/prepare-bundle.sh.
 -r requirements.txt
 python-docx>=1.1.0
 pypdf>=4.0.0
