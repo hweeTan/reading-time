@@ -8,9 +8,9 @@ try {
     pickOutputDirectory: (defaultPath) =>
       ipcRenderer.invoke('pick-output-directory', defaultPath),
     showItemInFolder: (p) => ipcRenderer.invoke('show-item-in-folder', p),
-    readFileBase64: (p) => ipcRenderer.invoke('read-file-base64', p),
     getModelsPath: () => ipcRenderer.invoke('get-models-path'),
     openModelsFolder: () => ipcRenderer.invoke('open-models-folder'),
+    getBootstrap: () => ipcRenderer.invoke('tts-bootstrap'),
     rpc: (cmd, payload) => ipcRenderer.invoke('tts-rpc', cmd, payload),
     onEvent: (handler) => {
       const listener = (_e, event) => handler(event)

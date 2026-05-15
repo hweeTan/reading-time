@@ -7,12 +7,20 @@ interface PlayerFooterProps {
   status: string;
   isError?: boolean;
   onUiReady: (ui: PlayerUi) => void;
+  onPlayClick: () => void;
+  onMuteClick: () => void;
+  onSeekInput: (value: number) => void;
+  onSeekChange: () => void;
 }
 
 export function PlayerFooter({
   status,
   isError,
   onUiReady,
+  onPlayClick,
+  onMuteClick,
+  onSeekInput,
+  onSeekChange,
 }: PlayerFooterProps) {
   const btnPlayRef = useRef<HTMLButtonElement>(null);
   const seekRef = useRef<HTMLInputElement>(null);
@@ -52,6 +60,7 @@ export function PlayerFooter({
           ref={btnPlayRef}
           className={styles.playerBtn}
           aria-label="Play"
+          onClick={onPlayClick}
         >
           ▶
         </button>
@@ -65,6 +74,10 @@ export function PlayerFooter({
           step={0.05}
           disabled
           aria-label="Seek"
+          onInput={(e) =>
+            onSeekInput(parseFloat(e.currentTarget.value) || 0)
+          }
+          onChange={onSeekChange}
         />
         <span ref={timeRef} className={styles.playerTime}>
           0:00 / 0:00
@@ -80,6 +93,7 @@ export function PlayerFooter({
           className={`${styles.playerMute} is-muted`}
           aria-pressed
           title="Muted — click to unmute"
+          onClick={onMuteClick}
         >
           <svg
             className={`mute-icon ${styles.muteIcon}`}

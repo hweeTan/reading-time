@@ -38,7 +38,7 @@ export default function App() {
   const [modelsReady, setModelsReady] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const [modelsPath, setModelsPath] = useState("");
-  const [modelStatusText, setModelStatusText] = useState("Connecting…");
+  const [modelStatusText, setModelStatusText] = useState("Connecting...");
   const [modelStatusClass, setModelStatusClass] = useState<
     "" | "ready" | "loading"
   >("");
@@ -168,7 +168,7 @@ export default function App() {
     setDownloadDisabled(false);
     setModelDownloadRunning(false);
 
-    setModelStatusText("Loading model…");
+    setModelStatusText("Loading model...");
     setModelStatusClass("loading");
     try {
       await ttsApi.warmup();
@@ -303,26 +303,33 @@ export default function App() {
     [setStatus]
   );
 
-  const clearAndCancelStream = useCallback((): boolean => {
-    const player = playerRef.current;
+  const cancelActiveStream = useCallback(async () => {
     const streamJob = streamJobRef.current;
-    const hadPlayback =
-      streamSourceTextRef.current !== null ||
-      streamJob?.status === "running" ||
-      Boolean(player?.session);
-
-    if (!hadPlayback) return false;
-
     if (streamJob?.status === "running") {
       syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
-      ttsApi.cancelJob(streamJob.id).catch(() => { });
+      try {
+        await ttsApi.cancelJob(streamJob.id);
+      } catch {
+        /* ignore */
+      }
     }
     streamJobRef.current = null;
     streamSourceTextRef.current = null;
     lastStreamPlaybackSync.current = { playing: null, chunk: null };
-    player?.reset();
-    return true;
+    playerRef.current?.reset();
   }, [syncStreamPlaybackControl]);
+
+  const clearAndCancelStream = useCallback((): boolean => {
+    const hadPlayback =
+      streamSourceTextRef.current !== null ||
+      streamJobRef.current?.status === "running" ||
+      Boolean(playerRef.current?.session);
+
+    if (!hadPlayback) return false;
+
+    void cancelActiveStream();
+    return true;
+  }, [cancelActiveStream]);
 
   const stopStreamPlayback = useCallback(() => {
     clearAndCancelStream();
@@ -341,13 +348,7 @@ export default function App() {
       const player = playerRef.current;
       if (!player) return false;
 
-      const streamJob = streamJobRef.current;
-      if (streamJob?.status === "running") {
-        syncStreamPlaybackControl({ playing: false, playbackChunkIndex: 1 });
-        ttsApi.cancelJob(streamJob.id).catch(() => { });
-      }
-      streamJobRef.current = null;
-      player.reset();
+      await cancelActiveStream();
 
       const id = `stream-${++jobCounterRef.current}`;
       const title = streamJobTitle(synthText);
@@ -385,6 +386,7 @@ export default function App() {
       emotion,
       failStreamJob,
       setStatus,
+      cancelActiveStream,
     ]
   );
 
@@ -437,6 +439,8 @@ export default function App() {
       setJobs((prev) => [job, ...prev]);
 
       try {
+        // Worker runs one job at a time; stop live playback so file synthesis can start.
+        await cancelActiveStream();
         await ttsApi.startJob({
           jobId: id,
           text: stripUnwantedChars(jobText),
@@ -446,16 +450,21 @@ export default function App() {
           emotion,
           maxChunkChars: 350,
         });
-        setJobs((prev) =>
-          prev.map((j) => (j.id === id ? { ...j, status: "running" } : j))
-        );
-        setStatus(`Generating: ${job.title}`);
+        setStatus(`Queued: ${job.title}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         failJob(id, msg);
       }
     },
-    [requireModelsReady, outputDir, voiceId, emotion, failJob, setStatus]
+    [
+      requireModelsReady,
+      outputDir,
+      voiceId,
+      emotion,
+      failJob,
+      setStatus,
+      cancelActiveStream,
+    ]
   );
 
   const importFiles = useCallback(
@@ -480,8 +489,12 @@ export default function App() {
       const streamJob = streamJobRef.current;
       const player = playerRef.current;
       if (!streamJob || !player || event.jobId !== streamJob.id) return false;
-      if (streamJob.status === "error" || streamJob.status === "cancelled")
+      if (streamJob.status === "error" || streamJob.status === "cancelled") {
         return true;
+      }
+      if (streamJob.status !== "running") {
+        return false;
+      }
 
       if (event.type === "chunks_truncated") {
         player.truncateFromChunk(event.fromChunkIndex ?? 1);
@@ -577,6 +590,7 @@ export default function App() {
           j.status = "running";
           j.progress = 0;
           j.totalChunks = event.totalChunks || 0;
+          setStatus(`Generating: ${j.title}`);
         } else if (
           event.type === "chunk_started" &&
           j.status === "running"
@@ -690,13 +704,34 @@ export default function App() {
     player.syncUi();
   }, []);
 
+  const handlePlayerPlayClick = useCallback(() => {
+    playerRef.current?.handlePlayClick();
+  }, []);
+
+  const handlePlayerMuteClick = useCallback(() => {
+    playerRef.current?.handleMuteClick();
+  }, []);
+
+  const handlePlayerSeekInput = useCallback((value: number) => {
+    playerRef.current?.handleSeekInput(value);
+  }, []);
+
+  const handlePlayerSeekChange = useCallback(() => {
+    playerRef.current?.handleSeekChange();
+  }, []);
+
   // Re-bind play/stream handlers when deps change without recreating AudioPlayer.
   useEffect(() => {
     const player = playerRef.current;
     if (player) bindPlayerHandlersRef.current(player);
   }, [bindPlayerHandlers]);
 
+  const onModelsReadyRef = useRef(onModelsReady);
+  onModelsReadyRef.current = onModelsReady;
+
   useEffect(() => {
+    let cancelled = false;
+
     void (async () => {
       try {
         if (typeof window.ttsApp === "undefined") {
@@ -704,13 +739,14 @@ export default function App() {
             "Electron bridge missing — use pnpm run dev from electron/, not a browser tab."
           );
         }
-        await ttsApi.ping();
-        const path = await ttsApi.getModelsPath();
-        setModelsPath(path);
-        const status = await ttsApi.checkModels();
+        setModelStatusText("Checking models…");
+        const status = await ttsApi.getBootstrap();
+        if (cancelled) return;
+
+        setModelsPath(status.modelsPath || status.path || "");
 
         if (status.installed) {
-          await onModelsReady();
+          await onModelsReadyRef.current();
         } else {
           setModelStatusText("Setup required");
           setModelStatusClass("");
@@ -723,6 +759,7 @@ export default function App() {
           }
         }
       } catch (e) {
+        if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         setModelStatusText("Offline");
         setModelStatusClass("");
@@ -731,7 +768,11 @@ export default function App() {
         setSetupError(msg);
       }
     })();
-  }, [onModelsReady, setStatus]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setStatus]);
 
   useEffect(() => {
     document.body.classList.toggle("appLocked", showSetup);
@@ -933,15 +974,6 @@ export default function App() {
                 });
               }}
               onReveal={(path) => void ttsApi.showItemInFolder(path)}
-              onPlay={async (job) => {
-                if (!job.outputPath) return;
-                const player = playerRef.current;
-                if (!player) return;
-                player.beginSession(job.id, { title: job.title });
-                player.knownDurationSec = 0;
-                await player.loadFile(job.id, job.outputPath);
-                player.play();
-              }}
               onClearDone={() => {
                 setJobs((prev) =>
                   prev.filter(
@@ -995,6 +1027,10 @@ export default function App() {
           status={footerStatus}
           isError={footerError}
           onUiReady={handlePlayerUi}
+          onPlayClick={handlePlayerPlayClick}
+          onMuteClick={handlePlayerMuteClick}
+          onSeekInput={handlePlayerSeekInput}
+          onSeekChange={handlePlayerSeekChange}
         />
       </div>
     </>

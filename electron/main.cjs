@@ -9,6 +9,11 @@ let pythonProc = null
 let reqCounter = 0
 const pending = new Map()
 let workerStderr = ''
+let workerSignaledReady = false
+let workerBootComplete = false
+let rpcSerial = Promise.resolve()
+let bootstrapCache = null
+let bootstrapPromise = null
 
 function isPackagedApp() {
   return app.isPackaged
@@ -32,13 +37,22 @@ function devBundlePythonExecutable() {
   return path.join(home, 'bin', 'python3')
 }
 
+function packagedPythonCandidates() {
+  const base = path.join(process.resourcesPath, 'python')
+  if (process.platform === 'win32') {
+    return [path.join(base, 'Scripts', 'python.exe')]
+  }
+  // Prefer python3; some venvs only expose `python` as the real file.
+  return [path.join(base, 'bin', 'python3'), path.join(base, 'bin', 'python')]
+}
+
 function pythonExecutable() {
   if (process.env.TTS_PYTHON) return process.env.TTS_PYTHON
   if (isPackagedApp()) {
-    if (process.platform === 'win32') {
-      return path.join(process.resourcesPath, 'python', 'Scripts', 'python.exe')
+    for (const candidate of packagedPythonCandidates()) {
+      if (fs.existsSync(candidate)) return candidate
     }
-    return path.join(process.resourcesPath, 'python', 'bin', 'python3')
+    return packagedPythonCandidates()[0]
   }
   const devBundlePy = devBundlePythonExecutable()
   if (fs.existsSync(devBundlePy)) return devBundlePy
@@ -67,6 +81,15 @@ function workerEnv() {
         ? path.join(pyHome, 'Scripts')
         : path.join(pyHome, 'bin')
     env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`
+    // Do not set PYTHONHOME with a venv — it breaks stdlib discovery (encodings).
+    delete env.PYTHONHOME
+    if (isPackagedApp() && process.platform === 'darwin') {
+      const fwDir = path.join(pyHome, 'Frameworks')
+      if (fs.existsSync(fwDir)) {
+        const cur = env.DYLD_FRAMEWORK_PATH || ''
+        env.DYLD_FRAMEWORK_PATH = cur ? `${fwDir}${path.delimiter}${cur}` : fwDir
+      }
+    }
   }
   return env
 }
@@ -94,11 +117,15 @@ function assertWorkerRuntime() {
 function startPythonWorker() {
   assertWorkerRuntime()
   workerStderr = ''
+  workerSignaledReady = false
+  workerBootComplete = false
+  bootstrapCache = null
+  bootstrapPromise = null
   const root = ttsRoot()
   const script = path.join(root, 'tts_worker.py')
   const py = pythonExecutable()
   console.log(`[ReadingTime] Starting worker: ${py} ${script}`)
-  pythonProc = spawn(py, [script], {
+  pythonProc = spawn(py, ['-u', script], {
     cwd: root,
     env: workerEnv(),
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -115,6 +142,9 @@ function startPythonWorker() {
     }
 
     if (msg.event) {
+      if (msg.event.type === 'worker_ready') {
+        workerSignaledReady = true
+      }
       mainWindow?.webContents.send('tts-event', msg.event)
       return
     }
@@ -127,6 +157,11 @@ function startPythonWorker() {
     }
   })
 
+  pythonProc.on('error', (err) => {
+    console.error('[ReadingTime] Failed to spawn Python worker:', err)
+    workerStderr = `${workerStderr}\n${err.message}`.slice(-8000)
+  })
+
   pythonProc.stderr.on('data', (d) => {
     const chunk = d.toString()
     workerStderr = (workerStderr + chunk).slice(-8000)
@@ -135,6 +170,9 @@ function startPythonWorker() {
 
   pythonProc.on('exit', (code) => {
     console.error('Python worker exited:', code)
+    workerBootComplete = false
+    bootstrapCache = null
+    bootstrapPromise = null
     if (workerStderr.trim()) {
       console.error('[tts_worker] last stderr:\n', workerStderr.trim())
     }
@@ -145,11 +183,11 @@ function startPythonWorker() {
   })
 }
 
-function waitForWorkerReady(maxMs = 180_000) {
+function waitForWorkerReady(maxMs = 120_000) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + maxMs
 
-    const attempt = () => {
+    const poll = () => {
       if (!pythonProc) {
         reject(new Error('Python worker not started'))
         return
@@ -165,54 +203,102 @@ function waitForWorkerReady(maxMs = 180_000) {
         )
         return
       }
-
-      rpc('ping')
-        .then(() => resolve())
-        .catch(() => {
-          if (Date.now() >= deadline) {
-            reject(
-              new Error(
-                'Python worker did not respond in time (still loading models?).',
-              ),
-            )
-            return
-          }
-          setTimeout(attempt, 400)
-        })
+      if (workerSignaledReady) {
+        workerBootComplete = true
+        resolve()
+        return
+      }
+      if (Date.now() >= deadline) {
+        const hint = workerStderr.trim() ? `\n\n${workerStderr.trim()}` : ''
+        const dyld = workerStderr.includes('Library not loaded')
+        reject(
+          new Error(
+            (dyld
+              ? 'Bundled Python failed to start (missing library). Rebuild the Intel DMG so Python.framework is embedded in the app.'
+              : 'Python worker did not respond in time.') +
+              ' No worker_ready signal received.' +
+              hint +
+              '\n\nTry: cd electron && pnpm run prepare-bundle',
+          ),
+        )
+        return
+      }
+      setTimeout(poll, 50)
     }
 
-    setTimeout(attempt, 300)
+    poll()
   })
 }
 
-function rpc(cmd, payload = {}) {
-  return new Promise((resolve, reject) => {
-    if (!pythonProc) {
-      reject(new Error('Python worker not started'))
-      return
+async function bootstrapWorker() {
+  if (bootstrapCache) return bootstrapCache
+  if (bootstrapPromise) return bootstrapPromise
+
+  bootstrapPromise = (async () => {
+    if (!pythonProc || pythonProc.exitCode != null) {
+      startPythonWorker()
     }
-    const id = String(++reqCounter)
-    let timeoutMs = 600_000
-    if (cmd === 'preview_voice') timeoutMs = 120_000
-    if (cmd === 'download_models') timeoutMs = 3_600_000
-    const timer = setTimeout(() => {
-      if (pending.has(id)) {
-        pending.delete(id)
-        reject(new Error(`Timeout: ${cmd}`))
+    await waitForWorkerReady()
+    const modelsPath = getModelsHome()
+    const status = await rpc('check_models', {}, 120_000)
+    bootstrapCache = { modelsPath, ...status }
+    return bootstrapCache
+  })()
+
+  try {
+    return await bootstrapPromise
+  } catch (err) {
+    bootstrapPromise = null
+    throw err
+  }
+}
+
+function rpc(cmd, payload = {}, timeoutMs) {
+  const run = () =>
+    new Promise((resolve, reject) => {
+      if (!pythonProc) {
+        reject(new Error('Python worker not started'))
+        return
       }
-    }, timeoutMs)
-    pending.set(id, {
-      resolve: (data) => {
-        clearTimeout(timer)
-        resolve(data)
-      },
-      reject: (err) => {
-        clearTimeout(timer)
-        reject(err)
-      },
+      if (pythonProc.exitCode != null) {
+        reject(new Error('Python worker stopped'))
+        return
+      }
+      const id = String(++reqCounter)
+      let ms = timeoutMs
+      if (ms == null) {
+        ms = 600_000
+        if (cmd === 'ping') ms = 60_000
+        if (cmd === 'check_models') ms = 60_000
+        if (cmd === 'preview_voice') ms = 120_000
+        if (cmd === 'download_models') ms = 3_600_000
+      }
+      const timer = setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id)
+          reject(new Error(`Timeout: ${cmd}`))
+        }
+      }, ms)
+      pending.set(id, {
+        resolve: (data) => {
+          clearTimeout(timer)
+          resolve(data)
+        },
+        reject: (err) => {
+          clearTimeout(timer)
+          reject(err)
+        },
+      })
+      const line = JSON.stringify({ id, cmd, ...payload }) + '\n'
+      const ok = pythonProc.stdin.write(line, 'utf8')
+      if (!ok) {
+        pythonProc.stdin.once('drain', () => {})
+      }
     })
-    pythonProc.stdin.write(JSON.stringify({ id, cmd, ...payload }) + '\n')
-  })
+
+  const job = rpcSerial.then(run, run)
+  rpcSerial = job.catch(() => {})
+  return job
 }
 
 function createWindow() {
@@ -245,8 +331,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   try {
-    startPythonWorker()
-    await waitForWorkerReady()
+    await bootstrapWorker()
     createWindow()
   } catch (err) {
     console.error(err)
@@ -263,8 +348,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+app.on('activate', async () => {
+  if (BrowserWindow.getAllWindows().length > 0) return
+  try {
+    await bootstrapWorker()
+    createWindow()
+  } catch (err) {
+    console.error(err)
+    dialog.showErrorBox('ReadingTime', err.message)
+  }
 })
 
 ipcMain.handle('pick-input-files', async () => {
@@ -301,11 +393,6 @@ ipcMain.handle('show-item-in-folder', async (_, filePath) => {
   shell.showItemInFolder(filePath)
 })
 
-ipcMain.handle('read-file-base64', async (_, filePath) => {
-  const data = await fs.promises.readFile(filePath)
-  return data.toString('base64')
-})
-
 ipcMain.handle('get-models-path', () => getModelsHome())
 
 ipcMain.handle('open-models-folder', async () => {
@@ -314,4 +401,16 @@ ipcMain.handle('open-models-folder', async () => {
   shell.openPath(dir)
 })
 
-ipcMain.handle('tts-rpc', async (_, cmd, payload) => rpc(cmd, payload))
+ipcMain.handle('tts-bootstrap', async () => bootstrapWorker())
+
+ipcMain.handle('tts-rpc', async (_, cmd, payload) => {
+  if (
+    cmd === 'ping' &&
+    workerBootComplete &&
+    pythonProc &&
+    pythonProc.exitCode == null
+  ) {
+    return { pong: true }
+  }
+  return rpc(cmd, payload)
+})

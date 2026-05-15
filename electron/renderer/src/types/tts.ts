@@ -69,6 +69,12 @@ export interface CheckModelsResult {
   codecReady?: boolean;
 }
 
+export interface BootstrapResult extends CheckModelsResult {
+  modelsPath: string;
+  path?: string;
+  hubPath?: string;
+}
+
 export interface PreviewVoiceResult {
   audioWavBase64: string;
   duration: number;

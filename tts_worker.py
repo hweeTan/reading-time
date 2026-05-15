@@ -12,18 +12,26 @@ import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from queue import Queue
 
-from document_import import SUPPORTED_EXTENSIONS, extract_text
 from model_manager import apply_hf_env, download_models, is_models_installed, models_status
-from tts_engine import PREVIEW_SAMPLE_TEXT, SynthesisConfig, TTSEngine
 
 apply_hf_env()
 
-_engine = TTSEngine()
+_engine = None
 _executor = ThreadPoolExecutor(max_workers=1)
 _out_lock = threading.Lock()
+
+# Only ping on the stdin thread — never block it behind check_models / warmup.
+_FAST_CMDS = frozenset({"ping"})
+
+
+def _engine_lazy():
+    global _engine
+    if _engine is None:
+        from tts_engine import TTSEngine
+
+        _engine = TTSEngine()
+    return _engine
 
 
 def _require_models() -> None:
@@ -55,7 +63,7 @@ def _run_job(
     job_id: str,
     text: str,
     output_path: str | None,
-    config: SynthesisConfig,
+    config,
     *,
     save_output: bool,
 ) -> None:
@@ -63,8 +71,10 @@ def _run_job(
         _emit({"event": event})
 
     try:
+        from pathlib import Path
+
         path = Path(output_path) if output_path else None
-        _engine.synthesize(
+        _engine_lazy().synthesize(
             job_id,
             text,
             path,
@@ -117,8 +127,9 @@ def _handle(req: dict) -> None:
 
         elif cmd == "list_voices":
             _require_models()
-            _engine.ensure_model(lambda e: _emit({"event": e}))
-            _respond(req_id, {"voices": _engine.list_voices()})
+            eng = _engine_lazy()
+            eng.ensure_model(lambda e: _emit({"event": e}))
+            _respond(req_id, {"voices": eng.list_voices()})
 
         elif cmd == "warmup":
             _require_models()
@@ -126,24 +137,30 @@ def _handle(req: dict) -> None:
             def on_status(event: dict) -> None:
                 _emit({"event": event})
 
-            _engine.ensure_model(on_status)
-            _respond(req_id, {"ready": True, "voices": _engine.list_voices()})
+            eng = _engine_lazy()
+            eng.ensure_model(on_status)
+            _respond(req_id, {"ready": True, "voices": eng.list_voices()})
 
         elif cmd == "get_dictionary":
+            eng = _engine_lazy()
             _respond(
                 req_id,
                 {
-                    "dictionary": _engine.get_dictionary(),
-                    "userDictionary": _engine.get_user_dictionary(),
+                    "dictionary": eng.get_dictionary(),
+                    "userDictionary": eng.get_user_dictionary(),
                 },
             )
 
         elif cmd == "save_dictionary":
             entries = req.get("entries") or {}
-            merged = _engine.save_dictionary(entries)
+            merged = _engine_lazy().save_dictionary(entries)
             _respond(req_id, {"dictionary": merged})
 
         elif cmd == "extract_text":
+            from pathlib import Path
+
+            from document_import import SUPPORTED_EXTENSIONS, extract_text
+
             path = Path(req["path"])
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 raise ValueError(f"Unsupported type: {path.suffix}")
@@ -151,6 +168,8 @@ def _handle(req: dict) -> None:
             _respond(req_id, {"text": text, "path": str(path)})
 
         elif cmd == "preview_voice":
+            from tts_engine import PREVIEW_SAMPLE_TEXT, SynthesisConfig
+
             _require_models()
             cfg = SynthesisConfig(
                 voice_id=req.get("voiceId", "Doan"),
@@ -162,16 +181,17 @@ def _handle(req: dict) -> None:
             def on_status(event: dict) -> None:
                 _emit({"event": event})
 
-            _engine.ensure_model(on_status)
-            data = _engine.preview_voice(cfg.voice_id, text=sample, config=cfg)
+            eng = _engine_lazy()
+            eng.ensure_model(on_status)
+            data = eng.preview_voice(cfg.voice_id, text=sample, config=cfg)
             _respond(req_id, data)
 
         elif cmd == "cancel_job":
-            _engine.cancel_job(req["jobId"])
+            _engine_lazy().cancel_job(req["jobId"])
             _respond(req_id, {"jobId": req["jobId"]})
 
         elif cmd == "set_job_playback":
-            _engine.set_job_playback(
+            _engine_lazy().set_job_playback(
                 req["jobId"],
                 playing=bool(req.get("playing", False)),
                 playback_chunk=req.get("playbackChunkIndex"),
@@ -179,7 +199,7 @@ def _handle(req: dict) -> None:
             _respond(req_id, {"jobId": req["jobId"]})
 
         elif cmd == "set_job_synth_config":
-            _engine.set_job_synth_config(
+            _engine_lazy().set_job_synth_config(
                 req["jobId"],
                 voice_id=req.get("voiceId"),
                 emotion=req.get("emotion"),
@@ -187,6 +207,8 @@ def _handle(req: dict) -> None:
             _respond(req_id, {"jobId": req["jobId"]})
 
         elif cmd == "start_job":
+            from tts_engine import SynthesisConfig
+
             _require_models()
             job_id = req["jobId"]
             save_output = bool(req.get("saveOutput", True))
@@ -219,6 +241,7 @@ def _handle(req: dict) -> None:
 
 
 def main() -> None:
+    _emit({"event": {"type": "worker_ready"}})
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -228,7 +251,11 @@ def main() -> None:
         except json.JSONDecodeError as exc:
             _emit({"ok": False, "error": f"Invalid JSON: {exc}"})
             continue
-        threading.Thread(target=_handle, args=(req,), daemon=True).start()
+        cmd = req.get("cmd", "")
+        if cmd in _FAST_CMDS:
+            _handle(req)
+        else:
+            threading.Thread(target=_handle, args=(req,), daemon=True).start()
 
 
 if __name__ == "__main__":

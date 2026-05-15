@@ -23,6 +23,8 @@ jobs:
     env:
       # Unsigned CI build; avoids hanging on code-sign discovery.
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # x64 bundle includes onnxruntime + llama-cpp + embedded Python dylib (~350–450 MB).
+      BUNDLE_SIZE_BUDGET_MB: "500"
 
     steps:
       - name: Checkout
@@ -56,7 +58,7 @@ jobs:
           set -euo pipefail
           pnpm run build:renderer
           pnpm run prepare-bundle
-          pnpm exec electron-builder --mac dmg --x64 --publish never
+          pnpm exec electron-builder --mac dmg --x64 --publish never -c.mac.hardenedRuntime=false
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4

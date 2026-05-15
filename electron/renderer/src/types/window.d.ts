@@ -1,4 +1,4 @@
-import type { TtsEvent } from './tts'
+import type { BootstrapResult, TtsEvent } from './tts'
 
 export interface TtsAppBridge {
   getPathForFile(file: File): string
@@ -6,9 +6,9 @@ export interface TtsAppBridge {
   pickOutputFile(name: string): Promise<string | null>
   pickOutputDirectory(defaultPath?: string): Promise<string | null>
   showItemInFolder(p: string): Promise<void>
-  readFileBase64(p: string): Promise<string>
   getModelsPath(): Promise<string>
   openModelsFolder(): Promise<void>
+  getBootstrap(): Promise<BootstrapResult>
   rpc(cmd: string, payload?: unknown): Promise<unknown>
   onEvent(handler: (event: TtsEvent) => void): () => void
 }

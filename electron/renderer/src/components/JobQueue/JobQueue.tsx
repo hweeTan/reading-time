@@ -7,7 +7,6 @@ interface JobQueueProps {
   jobs: Job[];
   onCancel: (jobId: string) => void;
   onReveal: (path: string) => void;
-  onPlay: (job: Job) => void;
   onClearDone: () => void;
 }
 
@@ -15,7 +14,6 @@ export function JobQueue({
   jobs,
   onCancel,
   onReveal,
-  onPlay,
   onClearDone,
 }: JobQueueProps) {
   return (
@@ -69,22 +67,13 @@ export function JobQueue({
                   </button>
                 )}
                 {job.status === "done" && job.outputPath && (
-                  <>
-                    <button
-                      type="button"
-                      className={`${ui.btn} ${ui.ghost} ${ui.small}`}
-                      onClick={() => onReveal(job.outputPath!)}
-                    >
-                      Show in Finder
-                    </button>
-                    <button
-                      type="button"
-                      className={`${ui.btn} ${ui.ghost} ${ui.small}`}
-                      onClick={() => onPlay(job)}
-                    >
-                      Play
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    className={`${ui.btn} ${ui.ghost} ${ui.small}`}
+                    onClick={() => onReveal(job.outputPath!)}
+                  >
+                    Show in Finder
+                  </button>
                 )}
               </div>
             </li>

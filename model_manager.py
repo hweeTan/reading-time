@@ -33,6 +33,52 @@ def _repo_cache_dir(repo_id: str) -> Path:
     return hub_cache() / ("models--" + repo_id.replace("/", "--"))
 
 
+def _snapshot_revision_dirs(repo_dir: Path) -> list[Path]:
+    """HF Hub stores checked-out files under snapshots/<revision_hash>/."""
+    snap = repo_dir / "snapshots"
+    if not snap.is_dir():
+        return []
+    return sorted(p for p in snap.iterdir() if p.is_dir())
+
+
+def _find_under_snapshots(repo_dir: Path, *, suffix: str | None = None, name: str | None = None) -> bool:
+    """
+    Match files only under snapshots/*/ (small tree of symlinks to blobs).
+
+    A full repo_dir.rglob() walks blobs/ and can hang for minutes on large caches
+    (e.g. Intel Mac + big hub) while the UI stays on 'Connecting…'.
+    """
+    revs = _snapshot_revision_dirs(repo_dir)
+    for d in revs:
+        if suffix:
+            if any(p.is_file() and p.suffix == suffix for p in d.rglob(f"*{suffix}")):
+                return True
+        if name:
+            if any(p.is_file() and p.name == name for p in d.rglob(name)):
+                return True
+    return False
+
+
+def _find_shallow_nonstandard(repo_dir: Path, *, suffix: str | None = None, name: str | None = None) -> bool:
+    """Fallback when cache has no snapshots/ (nonstandard layout); avoid deep tree walks."""
+    if suffix:
+        if any(p.is_file() and p.suffix == suffix for p in repo_dir.glob(f"*{suffix}")):
+            return True
+        for child in repo_dir.iterdir():
+            if child.is_dir() and child.name != "blobs":
+                if any(p.is_file() and p.suffix == suffix for p in child.glob(f"*{suffix}")):
+                    return True
+    if name:
+        if (repo_dir / name).is_file():
+            return True
+        for child in repo_dir.iterdir():
+            if child.is_dir() and child.name != "blobs":
+                hit = next(child.glob(name), None)
+                if hit is not None and hit.is_file():
+                    return True
+    return False
+
+
 def clear_hf_offline_env() -> None:
     """Ensure Hub clients can reach the network when needed (download, metadata)."""
     os.environ.pop("HF_HUB_OFFLINE", None)
@@ -56,8 +102,12 @@ def _backbone_ready() -> bool:
     repo_dir = _repo_cache_dir(BACKBONE_REPO)
     if not repo_dir.is_dir():
         return False
-    has_gguf = any(repo_dir.rglob("*.gguf"))
-    has_voices = any(repo_dir.rglob("voices.json"))
+    has_gguf = _find_under_snapshots(repo_dir, suffix=".gguf") or _find_shallow_nonstandard(
+        repo_dir, suffix=".gguf"
+    )
+    has_voices = _find_under_snapshots(repo_dir, name="voices.json") or _find_shallow_nonstandard(
+        repo_dir, name="voices.json"
+    )
     return has_gguf and has_voices
 
 
@@ -65,7 +115,13 @@ def _codec_ready() -> bool:
     repo_dir = _repo_cache_dir(CODEC_REPO)
     if not repo_dir.is_dir():
         return False
-    return any(repo_dir.rglob("*.onnx")) or any(repo_dir.rglob("*.json"))
+    if _find_under_snapshots(repo_dir, suffix=".onnx") or _find_under_snapshots(
+        repo_dir, suffix=".json"
+    ):
+        return True
+    return _find_shallow_nonstandard(repo_dir, suffix=".onnx") or _find_shallow_nonstandard(
+        repo_dir, suffix=".json"
+    )
 
 
 def is_models_installed() -> bool:

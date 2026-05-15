@@ -9,7 +9,10 @@ VIENEU_VERSION="${VIENEU_VERSION:-2.7.0}"
 
 echo "==> Preparing Python bundle at $BUNDLE_PY"
 rm -rf "$BUNDLE_PY"
-python3 -m venv "$BUNDLE_PY"
+# --copies: default macOS venvs symlink python3 to an absolute system path; that
+# symlink is useless inside a shipped .app on another machine (Electron checks
+# fail and the worker never starts). Copied interpreters stay under bundle/python.
+python3 -m venv --copies "$BUNDLE_PY"
 # shellcheck disable=SC1091
 source "$BUNDLE_PY/bin/activate"
 python -m pip install -U pip wheel
@@ -33,6 +36,15 @@ fi
 deactivate
 
 bash "$ROOT/scripts/prune-bundle.sh"
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # install_name_tool invalidates Mach-O signatures; sign before running python3
+  # (relocate verify, trim) or macOS 15 CI kills the interpreter with SIGKILL.
+  bash "$ROOT/scripts/relocate-bundle-python.sh" "$BUNDLE_PY"
+  bash "$ROOT/scripts/sign-bundle-python.sh" "$BUNDLE_PY"
+  bash "$ROOT/scripts/trim-bundle-python.sh" "$BUNDLE_PY"
+  bash "$ROOT/scripts/sign-bundle-python.sh" "$BUNDLE_PY"
+fi
 
 echo "==> Copying TTS worker sources to $BUNDLE_TTS"
 rm -rf "$BUNDLE_TTS"

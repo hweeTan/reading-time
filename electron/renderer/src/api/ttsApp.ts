@@ -1,4 +1,5 @@
 import type {
+  BootstrapResult,
   CheckModelsResult,
   PreviewVoiceResult,
   Voice,
@@ -14,6 +15,7 @@ function bridge() {
 }
 
 export const ttsApi = {
+  getBootstrap: () => bridge().getBootstrap() as Promise<BootstrapResult>,
   ping: () => bridge().rpc("ping"),
   checkModels: () => bridge().rpc("check_models") as Promise<CheckModelsResult>,
   warmup: () => bridge().rpc("warmup"),

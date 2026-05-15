@@ -8,7 +8,7 @@ export interface PlayerUi {
   muteLabel: HTMLElement | null
 }
 
-type PlayerState = 'idle' | 'playing' | 'paused' | 'buffering' | 'ended'
+type PlayerState = 'idle' | 'playing' | 'paused' | 'buffering'
 
 interface ChunkEntry {
   index: number
@@ -20,7 +20,6 @@ interface ChunkEntry {
 interface Session {
   jobId: string
   title: string
-  mode: 'streaming' | 'file'
   jobRunning: boolean
   autoPlayOnChunk: boolean
   wantsPlay: boolean
@@ -30,7 +29,7 @@ interface Session {
 }
 
 /**
- * Streaming + file playback with play/pause/seek and shared mute (master gain).
+ * Live stream playback with play/pause/seek and shared mute (master gain).
  */
 export class AudioPlayer {
   static readonly MUTE_ICON =
@@ -69,19 +68,24 @@ export class AudioPlayer {
 
   constructor(ui: PlayerUi) {
     this.ui = ui
+  }
 
-    ui.btnPlay.addEventListener('click', () => {
-      if (this.onPlayRequest?.()) return
-      this.togglePlay()
-    })
-    ui.btnMute.addEventListener('click', () => this.setMuted(!this.isMuted))
-    ui.seek.addEventListener('input', () => {
-      this.isScrubbing = true
-      this.seek(parseFloat(ui.seek.value) || 0)
-    })
-    ui.seek.addEventListener('change', () => {
-      this.isScrubbing = false
-    })
+  handlePlayClick() {
+    if (this.onPlayRequest?.()) return
+    this.togglePlay()
+  }
+
+  handleMuteClick() {
+    this.setMuted(!this.isMuted)
+  }
+
+  handleSeekInput(value: number) {
+    this.isScrubbing = true
+    this.seek(value)
+  }
+
+  handleSeekChange() {
+    this.isScrubbing = false
   }
 
   private ensureContext(): AudioContext {
@@ -149,7 +153,7 @@ export class AudioPlayer {
   }
 
   private isStreamingSession(): boolean {
-    return this.session?.mode === 'streaming' && this.session.jobRunning
+    return Boolean(this.session?.jobRunning)
   }
 
   private getStreamingPlayheadCap(): number {
@@ -250,18 +254,13 @@ export class AudioPlayer {
     for (const ch of this.session.chunks) {
       if (ph >= ch.startSec - 0.01) index = ch.index
     }
-    if (this.session.mode === 'file' && index === 0) {
-      return 1
-    }
     return index
   }
 
   private getChunkProgress() {
     if (!this.session) return null
     const loaded = this.session.chunks.length
-    const total =
-      this.session.totalChunks ||
-      (this.session.mode === 'file' && loaded > 0 ? 1 : 0)
+    const total = this.session.totalChunks || 0
     if (loaded === 0 && total === 0) return null
     const current = loaded > 0 ? this.getPlaybackChunkIndex() : 0
     return { current, loaded, total }
@@ -283,8 +282,7 @@ export class AudioPlayer {
   }
 
   private enterBufferWait() {
-    if (this.state !== 'playing' || this.session?.mode !== 'streaming') return
-    if (!this.session?.jobRunning) return
+    if (this.state !== 'playing' || !this.isStreamingSession()) return
 
     const bufEnd = this.getBufferedEndSec()
     const ph = this.getClockPlayheadSec()
@@ -387,9 +385,7 @@ export class AudioPlayer {
 
   private getSeekMaxSec(): number {
     const hasChunkEstimate =
-      this.session?.mode === 'streaming' &&
-      (this.session.totalChunks ?? 0) > 0 &&
-      this.totalDurationSec > 0
+      (this.session?.totalChunks ?? 0) > 0 && this.totalDurationSec > 0
     const displayTotal = hasChunkEstimate
       ? this.totalDurationSec
       : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001)
@@ -412,9 +408,7 @@ export class AudioPlayer {
     const { btnPlay, seek, timeLabel, chunksLabel } = this.ui
     const playhead = this.getPlayheadSec()
     const hasChunkEstimate =
-      this.session?.mode === 'streaming' &&
-      (this.session.totalChunks ?? 0) > 0 &&
-      this.totalDurationSec > 0
+      (this.session?.totalChunks ?? 0) > 0 && this.totalDurationSec > 0
     const displayTotal = hasChunkEstimate
       ? this.totalDurationSec
       : Math.max(this.totalDurationSec, this.knownDurationSec, 0.001)
@@ -448,7 +442,7 @@ export class AudioPlayer {
       chunksLabel.hidden = !progress
     }
 
-    if (this.state === 'ended' || (atEnd && this.session?.mode === 'file')) {
+    if (atEnd && !this.session?.jobRunning) {
       btnPlay.textContent = '▶'
     }
   }
@@ -476,14 +470,6 @@ export class AudioPlayer {
           this.notifyPlaybackControl()
         }
         if (ph >= this.knownDurationSec - 0.02) {
-          if (this.session?.mode === 'file') {
-            this.pause()
-            this.playheadSec = this.knownDurationSec
-            this.state = 'ended'
-            this.emitState()
-            this.rafId = 0
-            return
-          }
           if (!this.session?.jobRunning) {
             this.pause()
             this.state = 'paused'
@@ -557,7 +543,6 @@ export class AudioPlayer {
     this.session = {
       jobId,
       title,
-      mode: 'streaming',
       jobRunning: true,
       autoPlayOnChunk,
       wantsPlay: autoPlayOnChunk,
@@ -806,32 +791,6 @@ export class AudioPlayer {
     }
     this.notifyPlaybackControl()
     this.syncUi()
-  }
-
-  async loadFile(jobId: string, filePath: string, durationHint?: number) {
-    if (!this.session || this.session.jobId !== jobId) return
-    try {
-      const b64 = await window.ttsApp.readFileBase64(filePath)
-      const buffer = await this.decodeB64(b64)
-      this.stopScheduled()
-      this.session.mode = 'file'
-      this.session.jobRunning = false
-      this.session.chunks = [
-        { index: 0, buffer, startSec: 0, durationSec: buffer.duration },
-      ]
-      this.knownDurationSec = buffer.duration
-      this.totalDurationSec = durationHint ?? buffer.duration
-      if (
-        this.state === 'playing' &&
-        this.getPlayheadSec() > this.knownDurationSec
-      ) {
-        this.playheadSec = 0
-        this.pause()
-      }
-      this.emitState()
-    } catch (e) {
-      console.error('Failed to load output file for playback', e)
-    }
   }
 
   endSession(

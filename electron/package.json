@@ -30,6 +30,7 @@
       "renderer/dist/**/*"
     ],
     "asar": true,
+    "afterPack": "./after-pack.cjs",
     "extraResources": [
       {
         "from": "../bundle/python",
