@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/bundle-venv.sh
+. "$ROOT/scripts/bundle-venv.sh"
 BUNDLE_PY="$ROOT/bundle/python"
 BUNDLE_TTS="$ROOT/bundle/tts"
 VIENEU_VERSION="${VIENEU_VERSION:-2.7.0}"
@@ -23,8 +25,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   done
 fi
 "$PYTHON_FOR_VENV" -m venv --copies "$BUNDLE_PY"
-# shellcheck disable=SC1091
-source "$BUNDLE_PY/bin/activate"
+bundle_activate "$BUNDLE_PY"
 python -m pip install -U pip wheel
 
 echo "==> Installing vieneu==${VIENEU_VERSION} (--no-deps)"

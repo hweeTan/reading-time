@@ -1,0 +1,88 @@
+# Manual release build: Windows x64 portable zip only.
+name: Release Windows x64 (zip)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zip:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: electron
+        shell: bash
+
+    env:
+      # Unsigned CI build; avoids hanging on code-sign discovery.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # x64 bundle includes onnxruntime + llama-cpp + embedded Python (~350–450 MB).
+      BUNDLE_SIZE_BUDGET_MB: "500"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: electron/pnpm-lock.yaml
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert x86_64 runner
+        run: test "$(uname -m)" = "x86_64"
+
+      - name: Build renderer and Python bundle
+        run: |
+          set -euo pipefail
+          pnpm run build:renderer
+          pnpm run prepare-bundle
+
+      - name: Assert bundled Python prefix is self-contained
+        run: |
+          set -euo pipefail
+          ROOT="$(cd .. && pwd)"
+          # shellcheck source=scripts/bundle-venv.sh
+          . "$ROOT/scripts/bundle-venv.sh"
+          BUNDLE_PY="$ROOT/bundle/python"
+          PY="$(bundle_python_exe "$BUNDLE_PY")"
+          test -x "$PY"
+          echo "pyvenv.cfg:"
+          cat "$BUNDLE_PY/pyvenv.cfg"
+          "$PY" -c "import sys; print('prefix', sys.prefix); print('base_prefix', sys.base_prefix); print('path', sys.path[:4])"
+          "$PY" -c "
+          import sys
+          import encodings
+          print('encodings ok', encodings.__file__)
+          "
+
+      - name: Build x64 zip
+        run: pnpm exec electron-builder --win zip --x64 --publish never
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReadingTime-windows-x64
+          path: electron/dist/*-win.zip
+          if-no-files-found: error

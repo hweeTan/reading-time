@@ -301,14 +301,43 @@ else
   exit 1
 fi
 
+macho_depends_on() {
+  local f="$1"
+  local old="$2"
+  otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}' | grep -qF "$old"
+}
+
+macho_install_name_is() {
+  local f="$1"
+  local old="$2"
+  otool -D "$f" 2>/dev/null | grep -qF "$old"
+}
+
+set_macho_install_name() {
+  local f="$1"
+  local new_id="$2"
+  is_macho "$f" || return 0
+  install_name_tool -id "$new_id" "$f"
+}
+
 patch_macho() {
   local f="$1"
   local old="$2"
   local new="$3"
   is_macho "$f" || return 0
-  if otool -L "$f" 2>/dev/null | grep -qF "$old"; then
+  if macho_install_name_is "$f" "$old"; then
+    install_name_tool -id "$new" "$f"
+  fi
+  if macho_depends_on "$f" "$old"; then
     install_name_tool -change "$old" "$new" "$f"
   fi
+}
+
+patch_framework_install_names() {
+  local embedded_py="$DEST_FW/Versions/$VERSION/Python"
+  set_macho_install_name "$embedded_py" "@loader_path/Python"
+  set_macho_install_name "$PY_BIN" "@loader_path/../Frameworks/Python.framework/Versions/${VERSION}/Python"
+  echo "  set install names for embedded framework + bin/python3"
 }
 
 patch_tree() {
@@ -365,6 +394,7 @@ if [[ -n "${DEST_FW:-}" && -n "${VERSION}" && -n "${FRAMEWORK_ROOT}" ]]; then
       patch_macho "$f" "$old_lib" "$new_lib"
     done < <(find "$BUNDLE_PY/lib/python"* -name '*.so' -type f -print0 2>/dev/null)
   done
+  patch_framework_install_names
 fi
 
 write_pyvenv_cfg "${VERSION:-3.12}"
@@ -372,9 +402,11 @@ write_pyvenv_cfg "${VERSION:-3.12}"
 # Do not exec python3 here — install_name_tool breaks signatures until
 # sign-bundle-python.sh runs (see prepare-bundle.sh). otool-only checks below.
 
-if otool -L "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
+if macho_install_name_is "$PY_BIN" '/Library/Frameworks/Python.framework' \
+  || macho_depends_on "$PY_BIN" '/Library/Frameworks/Python.framework'; then
   echo "relocate-bundle-python: still links to system Python.framework" >&2
-  otool -L "$PY_BIN" | head -6 >&2
+  echo "  install name: $(otool -D "$PY_BIN" 2>/dev/null | tail -1 || true)" >&2
+  otool -L "$PY_BIN" 2>/dev/null | head -6 >&2
   exit 1
 fi
 

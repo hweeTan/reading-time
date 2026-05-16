@@ -3,9 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/bundle-venv.sh
+. "$ROOT/scripts/bundle-venv.sh"
 BUNDLE_PY="$ROOT/bundle/python"
 BUNDLE_TTS="$ROOT/bundle/tts"
-PY="$BUNDLE_PY/bin/python3"
+PY="$(bundle_python_exe "$BUNDLE_PY")"
 SIZE_BUDGET_MB="${BUNDLE_SIZE_BUDGET_MB:-400}"
 
 if [[ ! -x "$PY" ]]; then

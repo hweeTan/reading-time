@@ -3,15 +3,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/bundle-venv.sh
+. "$ROOT/scripts/bundle-venv.sh"
 BUNDLE_PY="$ROOT/bundle/python"
+PY="$(bundle_python_exe "$BUNDLE_PY")"
 
-if [[ ! -x "$BUNDLE_PY/bin/python3" ]]; then
-  echo "prune-bundle: venv not found at $BUNDLE_PY" >&2
+if [[ ! -x "$PY" ]]; then
+  echo "prune-bundle: venv not found at $BUNDLE_PY (expected $PY)" >&2
   exit 1
 fi
 
-# shellcheck disable=SC1091
-source "$BUNDLE_PY/bin/activate"
+bundle_activate "$BUNDLE_PY"
 
 ORPHANS=(
   gradio

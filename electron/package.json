@@ -53,6 +53,9 @@
     },
     "dmg": {
       "title": "ReadingTime ${version}"
+    },
+    "win": {
+      "target": ["zip"]
     }
   },
   "dependencies": {
