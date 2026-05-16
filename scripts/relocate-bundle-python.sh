@@ -106,31 +106,25 @@ sync_stdlib_native_only() {
   done
 }
 
-interpreter_references_python_app() {
+# Thin posix_spawn wrappers reference Python.app; the embedded libpython dylib is multi-MiB.
+interpreter_is_python_app_stub() {
   is_macho "$PY_BIN" || return 1
-  strings "$PY_BIN" 2>/dev/null | grep -q 'Python.app/Contents/MacOS/Python'
+  strings "$PY_BIN" 2>/dev/null | grep -q 'Python.app/Contents/MacOS/Python' || return 1
+  local bytes
+  bytes=$(wc -c <"$PY_BIN" | tr -d ' ')
+  [[ "$bytes" -lt 2000000 ]]
 }
 
-# venv --copies on python.org macOS is a stub that posix_spawns Python.app, which we
-# do not ship (and trim removes). Use the framework CLI binary or embedded dylib.
+# venv --copies on python.org macOS is a stub that posix_spawns Python.app. Framework
+# bin/python3.12 is often the same stub. Use the embedded Python dylib as bin/python3.
 install_framework_interpreter() {
-  local root="$FRAMEWORK_ROOT/Versions/$VERSION"
-  for candidate in "$root/bin/python${VERSION}" "$root/bin/python3"; do
-    if [[ -x "$candidate" ]]; then
-      cp -f "$candidate" "$PY_BIN"
-      chmod +x "$PY_BIN"
-      echo "  installed $(basename "$candidate") as bin/python3"
-      return 0
-    fi
-  done
-  if [[ -f "${DEST_FW}/Versions/${VERSION}/Python" ]]; then
-    cp -f "${DEST_FW}/Versions/${VERSION}/Python" "$PY_BIN"
-    chmod +x "$PY_BIN"
-    echo "  installed embedded Python dylib as bin/python3"
-    return 0
+  if [[ ! -f "${DEST_FW}/Versions/${VERSION}/Python" ]]; then
+    echo "relocate-bundle-python: missing embedded Python dylib" >&2
+    return 1
   fi
-  echo "relocate-bundle-python: no framework interpreter under $root/bin" >&2
-  return 1
+  cp -f "${DEST_FW}/Versions/${VERSION}/Python" "$PY_BIN"
+  chmod +x "$PY_BIN"
+  echo "  installed embedded Python dylib as bin/python3 (not Python.app stub)"
 }
 
 # First Python.framework / libpython dependency from otool (may be absolute or @-relative).
@@ -390,8 +384,8 @@ if strings "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework
   exit 1
 fi
 
-if [[ -n "${DEST_FW:-}" ]] && interpreter_references_python_app; then
-  echo "relocate-bundle-python: bin/python3 still posix_spawns Python.app (not bundled)" >&2
+if [[ -n "${DEST_FW:-}" ]] && interpreter_is_python_app_stub; then
+  echo "relocate-bundle-python: bin/python3 is still a Python.app stub (not a real interpreter)" >&2
   strings "$PY_BIN" 2>/dev/null | grep 'Python.app' | head -3 >&2
   exit 1
 fi
