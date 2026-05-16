@@ -23,7 +23,8 @@ if [[ -d "$BUNDLE_PY/Frameworks/Python.framework" ]]; then
     echo "  remove duplicate stdlib: $d"
     rm -rf "$d"
   done
-  for sub in include share bin Headers Resources; do
+  # Keep Resources/Python.app — venv bin/python3 posix_spawns it (see relocate-bundle-python.sh).
+  for sub in include share bin Headers; do
     find "$BUNDLE_PY/Frameworks/Python.framework/Versions" -maxdepth 2 -type d -name "$sub" 2>/dev/null | while read -r d; do
       echo "  remove framework $sub: $d"
       rm -rf "$d"

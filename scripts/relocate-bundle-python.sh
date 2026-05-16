@@ -106,25 +106,19 @@ sync_stdlib_native_only() {
   done
 }
 
-# Thin posix_spawn wrappers reference Python.app; the embedded libpython dylib is multi-MiB.
-interpreter_is_python_app_stub() {
-  is_macho "$PY_BIN" || return 1
-  strings "$PY_BIN" 2>/dev/null | grep -q 'Python.app/Contents/MacOS/Python' || return 1
-  local bytes
-  bytes=$(wc -c <"$PY_BIN" | tr -d ' ')
-  [[ "$bytes" -lt 2000000 ]]
-}
-
-# venv --copies on python.org macOS is a stub that posix_spawns Python.app. Framework
-# bin/python3.12 is often the same stub. Use the embedded Python dylib as bin/python3.
-install_framework_interpreter() {
-  if [[ ! -f "${DEST_FW}/Versions/${VERSION}/Python" ]]; then
-    echo "relocate-bundle-python: missing embedded Python dylib" >&2
+# python.org venv bin/python3 is a stub that posix_spawns Resources/Python.app; the dylib alone
+# is MH_DYLIB and cannot be executed (sign-bundle: "cannot execute binary file").
+embed_framework_python_app() {
+  local src_app="$FRAMEWORK_ROOT/Versions/$VERSION/Resources/Python.app"
+  local dest_app="$DEST_FW/Versions/$VERSION/Resources/Python.app"
+  if [[ ! -d "$src_app" ]]; then
+    echo "relocate-bundle-python: missing $src_app" >&2
     return 1
   fi
-  cp -f "${DEST_FW}/Versions/${VERSION}/Python" "$PY_BIN"
-  chmod +x "$PY_BIN"
-  echo "  installed embedded Python dylib as bin/python3 (not Python.app stub)"
+  echo "  embedding Python.app for venv launcher"
+  rm -rf "$dest_app"
+  mkdir -p "$(dirname "$dest_app")"
+  cp -R "$src_app" "$dest_app"
 }
 
 # First Python.framework / libpython dependency from otool (may be absolute or @-relative).
@@ -261,7 +255,8 @@ if [[ "$PY_LIB" == *Python.framework* ]]; then
     sync_stdlib_into_venv "$FW_STDLIB" "$VENV_STDLIB"
   fi
   PYVENV_HOME="$BUNDLE_PY/Frameworks/Python.framework/Versions/$VERSION"
-  install_framework_interpreter
+  embed_framework_python_app
+  # Keep venv bin/python3 stub; it execs the embedded Python.app above.
 
 elif [[ "$PY_LIB" == *libpython*.dylib ]]; then
   BASE_PREFIX="${BASE_PREFIX:-$(discover_base_prefix)}"
@@ -335,9 +330,16 @@ patch_macho() {
 
 patch_framework_install_names() {
   local embedded_py="$DEST_FW/Versions/$VERSION/Python"
+  local app_py="$DEST_FW/Versions/$VERSION/Resources/Python.app/Contents/MacOS/Python"
+  local new_for_app="@loader_path/../../../Python"
   set_macho_install_name "$embedded_py" "@loader_path/Python"
-  set_macho_install_name "$PY_BIN" "@loader_path/../Frameworks/Python.framework/Versions/${VERSION}/Python"
-  echo "  set install names for embedded framework + bin/python3"
+  for old in \
+    "$FRAMEWORK_ROOT/Versions/$VERSION/Python" \
+    "/Library/Frameworks/Python.framework/Versions/$VERSION/Python"; do
+    patch_macho "$app_py" "$old" "$new_for_app"
+    patch_macho "$PY_BIN" "$old" "$NEW_LIB"
+  done
+  echo "  patched install names (embedded dylib + Python.app + venv launcher)"
 }
 
 patch_tree() {
@@ -410,16 +412,19 @@ if macho_install_name_is "$PY_BIN" '/Library/Frameworks/Python.framework' \
   exit 1
 fi
 
-if strings "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
+if [[ -z "${DEST_FW:-}" ]] && strings "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
   echo "relocate-bundle-python: bin/python3 still embeds /Library/Frameworks path strings" >&2
   strings "$PY_BIN" 2>/dev/null | grep '/Library/Frameworks/Python.framework' | head -3 >&2
   exit 1
 fi
 
-if [[ -n "${DEST_FW:-}" ]] && interpreter_is_python_app_stub; then
-  echo "relocate-bundle-python: bin/python3 is still a Python.app stub (not a real interpreter)" >&2
-  strings "$PY_BIN" 2>/dev/null | grep 'Python.app' | head -3 >&2
-  exit 1
+if [[ -n "${DEST_FW:-}" ]]; then
+  bundled_app="$DEST_FW/Versions/$VERSION/Resources/Python.app/Contents/MacOS/Python"
+  if [[ ! -x "$bundled_app" ]]; then
+    echo "relocate-bundle-python: missing bundled Python.app interpreter at $bundled_app" >&2
+    exit 1
+  fi
+  echo "  ok: bundled Python.app interpreter present"
 fi
 
 echo "==> relocate-bundle-python OK ($(du -sh "$BUNDLE_PY" | cut -f1))"

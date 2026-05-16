@@ -13,8 +13,6 @@ if [[ ! -x "$PY" ]]; then
   exit 1
 fi
 
-bundle_activate "$BUNDLE_PY"
-
 ORPHANS=(
   gradio
   gradio_client
@@ -48,16 +46,15 @@ ORPHANS=(
 
 echo "==> Uninstalling orphan packages (ignore errors if absent)"
 for pkg in "${ORPHANS[@]}"; do
-  python -m pip uninstall -y "$pkg" 2>/dev/null || true
+  "$PY" -m pip uninstall -y "$pkg" 2>/dev/null || true
 done
 
-echo "==> Removing pip/setuptools/wheel from bundle venv"
-python -m pip uninstall -y pip setuptools wheel 2>/dev/null || true
+echo "==> Removing pip/setuptools/wheel from bundle"
+"$PY" -m pip uninstall -y pip setuptools wheel 2>/dev/null || true
 
-SITE="$(python -c "import site; print(site.getsitepackages()[0])")"
+SITE="$("$PY" -c "import site; print(site.getsitepackages()[0])")"
 echo "==> Stripping test dirs under $SITE"
 find "$SITE" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
 find "$SITE" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
-deactivate
 echo "==> Prune complete ($(du -sh "$BUNDLE_PY" | cut -f1))"

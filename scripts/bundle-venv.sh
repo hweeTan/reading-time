@@ -2,6 +2,13 @@
 # Cross-platform paths for bundle/python venv (Unix bin/ vs Windows Scripts/).
 # Source from other bundle scripts: . "$(dirname "$0")/bundle-venv.sh"
 
+bundle_is_windows() {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) return 0 ;;
+  esac
+  [[ "${OS:-}" == "Windows_NT" ]]
+}
+
 bundle_python_exe() {
   local bundle_py="$1"
   if [[ -x "$bundle_py/Scripts/python.exe" ]]; then

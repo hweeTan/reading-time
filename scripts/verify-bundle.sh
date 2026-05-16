@@ -57,6 +57,12 @@ if [[ -f "$BUNDLE_PY/pyvenv.cfg" ]]; then
   echo "  ok: pyvenv.cfg not tied to system framework"
 fi
 
+if bundle_is_windows && [[ -f "$BUNDLE_PY/pyvenv.cfg" ]]; then
+  echo "verify-bundle: unexpected pyvenv.cfg on Windows (use full Python copy, not venv)" >&2
+  cat "$BUNDLE_PY/pyvenv.cfg" >&2
+  exit 1
+fi
+
 echo "==> Prefix / stdlib self-containment"
 if ! "$PY" -c "
 import os
@@ -68,7 +74,11 @@ for name in ('prefix', 'base_prefix', 'exec_prefix', 'base_exec_prefix'):
     p = pathlib.Path(getattr(sys, name)).resolve()
     if '/Library/Frameworks/Python.framework' in str(p):
         raise SystemExit(f'{name}={p} still points at system Python.framework')
-    if not str(p).startswith(str(root)):
+    if os.name == 'nt':
+        # Windows standalone copy: prefix must live in the bundle; base_prefix may match prefix.
+        if name in ('prefix', 'exec_prefix') and not str(p).startswith(str(root)):
+            raise SystemExit(f'{name}={p} is not under bundle root {root}')
+    elif not str(p).startswith(str(root)):
         raise SystemExit(f'{name}={p} is not under bundle root {root}')
 
 import encodings

@@ -10,6 +10,19 @@ BUNDLE_TTS="$ROOT/bundle/tts"
 VIENEU_VERSION="${VIENEU_VERSION:-2.7.0}"
 
 echo "==> Preparing Python bundle at $BUNDLE_PY"
+
+if bundle_is_windows; then
+  bash "$ROOT/scripts/prepare-bundle-windows.sh"
+  echo "==> Copying TTS worker sources to $BUNDLE_TTS"
+  rm -rf "$BUNDLE_TTS"
+  mkdir -p "$BUNDLE_TTS"
+  for f in tts_worker.py tts_engine.py text_prep.py model_manager.py document_import.py speak_dictionary.json; do
+    cp "$ROOT/$f" "$BUNDLE_TTS/"
+  done
+  echo "==> Bundle ready ($(du -sh "$BUNDLE_PY" | cut -f1) python, $(du -sh "$BUNDLE_TTS" | cut -f1) tts)"
+  exit 0
+fi
+
 rm -rf "$BUNDLE_PY"
 # --copies: default macOS venvs symlink python3 to an absolute system path; that
 # symlink is useless inside a shipped .app on another machine (Electron checks

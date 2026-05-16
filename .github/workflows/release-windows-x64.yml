@@ -63,18 +63,26 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$(cd .. && pwd)"
+          export BUNDLE_PY="$ROOT/bundle/python"
           # shellcheck source=scripts/bundle-venv.sh
           . "$ROOT/scripts/bundle-venv.sh"
-          BUNDLE_PY="$ROOT/bundle/python"
           PY="$(bundle_python_exe "$BUNDLE_PY")"
           test -x "$PY"
-          echo "pyvenv.cfg:"
-          cat "$BUNDLE_PY/pyvenv.cfg"
-          "$PY" -c "import sys; print('prefix', sys.prefix); print('base_prefix', sys.base_prefix); print('path', sys.path[:4])"
+          test ! -f "$BUNDLE_PY/pyvenv.cfg"
           "$PY" -c "
-          import sys
+          import os, pathlib, sys
+          root = pathlib.Path(os.environ['BUNDLE_PY']).resolve()
+          for name in ('prefix', 'exec_prefix'):
+              p = pathlib.Path(getattr(sys, name)).resolve()
+              if not str(p).startswith(str(root)):
+                  raise SystemExit(f'{name}={p} is not under bundle root {root}')
           import encodings
-          print('encodings ok', encodings.__file__)
+          enc = pathlib.Path(encodings.__file__).resolve()
+          if not str(enc).startswith(str(root)):
+              raise SystemExit(f'encodings at {enc} is not under bundle root {root}')
+          print('prefix', sys.prefix)
+          print('base_prefix', sys.base_prefix)
+          print('encodings ok', enc)
           "
 
       - name: Build x64 zip
