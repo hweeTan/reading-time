@@ -12,7 +12,17 @@ rm -rf "$BUNDLE_PY"
 # --copies: default macOS venvs symlink python3 to an absolute system path; that
 # symlink is useless inside a shipped .app on another machine (Electron checks
 # fail and the worker never starts). Copied interpreters stay under bundle/python.
-python3 -m venv --copies "$BUNDLE_PY"
+PYTHON_FOR_VENV="python3"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  for candidate in "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"; do
+    if [[ -x "$candidate" ]] && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)'; then
+      PYTHON_FOR_VENV="$candidate"
+      echo "==> Using framework Python 3.12 for venv: $PYTHON_FOR_VENV"
+      break
+    fi
+  done
+fi
+"$PYTHON_FOR_VENV" -m venv --copies "$BUNDLE_PY"
 # shellcheck disable=SC1091
 source "$BUNDLE_PY/bin/activate"
 python -m pip install -U pip wheel

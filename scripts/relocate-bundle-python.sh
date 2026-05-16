@@ -3,6 +3,7 @@
 set -euo pipefail
 
 BUNDLE_PY="${1:-$(cd "$(dirname "$0")/.." && pwd)/bundle/python}"
+BUNDLE_PY="$(cd "$BUNDLE_PY" && pwd)"
 PY_BIN="$BUNDLE_PY/bin/python3"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -19,40 +20,193 @@ is_macho() {
   file "$1" 2>/dev/null | grep -q 'Mach-O'
 }
 
+PYVENV_HOME=""
+
+write_pyvenv_cfg() {
+  local version="${1:-3.12}"
+  local home="${PYVENV_HOME:-$BUNDLE_PY}"
+  cat >"$BUNDLE_PY/pyvenv.cfg" <<EOF
+home = ${home}
+include-system-site-packages = false
+version = ${version}.0
+executable = ${BUNDLE_PY}/bin/python3
+command = ${BUNDLE_PY}/bin/python3 -m venv --copies
+EOF
+}
+
+discover_base_prefix() {
+  "$PY_BIN" -c 'import sys; print(sys.base_prefix)'
+}
+
+discover_version() {
+  "$PY_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+}
+
+# Directories we never copy from the host stdlib (saves hundreds of MB).
+stdlib_should_skip() {
+  case "$1" in
+    test|tests|idlelib|tkinter|turtledemo|unittest|venv|ensurepip|distutils|lib2to3|pydoc_data|__phello__|_pyrepl|turtle|pdb|site-packages|__pycache__)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Copy python3.12.zip when the base install provides it (python.org framework, etc.).
+copy_stdlib_zip() {
+  local src_prefix="$1"
+  local copied=0
+  for z in \
+    "$src_prefix/lib/python${VERSION}.zip" \
+    "$src_prefix/lib/python${VERSION/./}.zip"; do
+    if [[ -f "$z" ]]; then
+      cp -f "$z" "$BUNDLE_PY/lib/python${VERSION}.zip"
+      echo "  copied stdlib zip $(basename "$z")"
+      copied=1
+      break
+    fi
+  done
+  return "$((1 - copied))"
+}
+
+# Small, portable stdlib slice: zip (if any) + lib-dynload/encodings + other missing dirs.
+sync_stdlib_into_venv() {
+  local src_stdlib="$1"
+  local venv_stdlib="$2"
+  [[ -d "$src_stdlib" ]] || return 0
+  mkdir -p "$venv_stdlib"
+  for required in encodings lib-dynload; do
+    if [[ -d "$src_stdlib/$required" ]]; then
+      rm -rf "$venv_stdlib/$required"
+      cp -R "$src_stdlib/$required" "$venv_stdlib/"
+    fi
+  done
+  echo "  syncing missing stdlib modules (skipping tests/tkinter/idlelib, etc.)"
+  for item in "$src_stdlib"/*; do
+    [[ -e "$item" ]] || continue
+    base="$(basename "$item")"
+    stdlib_should_skip "$base" && continue
+    [[ -e "$venv_stdlib/$base" ]] && continue
+    cp -R "$item" "$venv_stdlib/"
+  done
+  find "$venv_stdlib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+}
+
+# When python3.12.zip is present, only native stdlib dirs need to exist on disk.
+sync_stdlib_native_only() {
+  local src_stdlib="$1"
+  local venv_stdlib="$2"
+  [[ -d "$src_stdlib" ]] || return 0
+  mkdir -p "$venv_stdlib"
+  for required in encodings lib-dynload; do
+    if [[ -d "$src_stdlib/$required" ]]; then
+      rm -rf "$venv_stdlib/$required"
+      cp -R "$src_stdlib/$required" "$venv_stdlib/"
+    fi
+  done
+}
+
+# First Python.framework / libpython dependency from otool (may be absolute or @-relative).
+find_otool_py_lib() {
+  local dep
+  while IFS= read -r dep; do
+    dep="${dep//$'\t'/}"
+    [[ -z "$dep" ]] && continue
+    if [[ "$dep" == /usr/lib/* ]] || [[ "$dep" == /System/* ]]; then
+      continue
+    fi
+    if [[ "$dep" == *Python.framework* ]] || [[ "$dep" == *libpython*.dylib* ]]; then
+      echo "$dep"
+      return 0
+    fi
+  done < <(otool -L "$PY_BIN" 2>/dev/null | tail -n +2 | awk '{print $1}')
+  return 1
+}
+
+# Resolve @-prefixed install names that already point inside the bundle.
+resolve_bundled_at_path() {
+  local dep="$1"
+  local root="${dep#@loader_path/}"
+  root="${root#@executable_path/}"
+  local   candidate="$BUNDLE_PY/bin/$root"
+  if [[ -f "$candidate" ]]; then
+    echo "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    return 0
+  fi
+  candidate="$BUNDLE_PY/$root"
+  if [[ -f "$candidate" ]]; then
+    echo "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    return 0
+  fi
+  return 1
+}
+
 PY_LIB=""
-while IFS= read -r dep; do
-  dep="${dep//$'\t'/}"
-  [[ -z "$dep" ]] && continue
-  if [[ "$dep" == /usr/lib/* ]] || [[ "$dep" == /System/* ]]; then
-    continue
-  fi
-  if [[ "$dep" == *Python.framework* ]] || [[ "$dep" == *libpython*.dylib* ]]; then
-    PY_LIB="$dep"
-    break
-  fi
-done < <(otool -L "$PY_BIN" 2>/dev/null | tail -n +2 | awk '{print $1}')
+if PY_LIB="$(find_otool_py_lib)"; then
+  :
+else
+  PY_LIB=""
+fi
 
+# Resolve @-relative install names to a real file path when possible.
+if [[ -n "$PY_LIB" && "$PY_LIB" == @* ]]; then
+  if resolved="$(resolve_bundled_at_path "$PY_LIB")"; then
+    echo "==> relocate-bundle-python: resolved bundled dylib ($PY_LIB -> $resolved)"
+    PY_LIB="$resolved"
+  else
+    echo "==> relocate-bundle-python: resolving @ install name via sys.base_prefix"
+    PY_LIB=""
+  fi
+fi
+
+BASE_PREFIX=""
 if [[ -z "$PY_LIB" ]]; then
-  echo "==> relocate-bundle-python: no external Python dylib (ok)"
-  exit 0
+  BASE_PREFIX="$(discover_base_prefix)"
+  echo "==> relocate-bundle-python: discovered base_prefix=$BASE_PREFIX"
+  if [[ "$BASE_PREFIX" == *Python.framework* ]]; then
+    FRAMEWORK_ROOT="${BASE_PREFIX%%/Versions/*}"
+    VERSION="${BASE_PREFIX##*/Versions/}"
+    VERSION="${VERSION%%/*}"
+    PY_LIB="$BASE_PREFIX/Python"
+    if [[ ! -f "$PY_LIB" ]]; then
+      PY_LIB="$FRAMEWORK_ROOT/Versions/$VERSION/Python"
+    fi
+  elif compgen -G "$BASE_PREFIX/lib/libpython"*.dylib >/dev/null 2>&1; then
+    PY_LIB="$(ls "$BASE_PREFIX/lib/libpython"*.dylib 2>/dev/null | head -1)"
+  else
+    echo "relocate-bundle-python: cannot locate Python dylib (otool empty, base_prefix=$BASE_PREFIX)" >&2
+    exit 1
+  fi
 fi
 
-if [[ "$PY_LIB" == @* ]]; then
-  echo "==> relocate-bundle-python: already relocatable ($PY_LIB)"
-  exit 0
-fi
-
-echo "==> Relocating bundle/python (was: $PY_LIB)"
-
-NEW_LIB=""
-DEST_FW=""
-VERSION=""
+# If otool gave an absolute framework path, derive FRAMEWORK_ROOT / VERSION early.
 FRAMEWORK_ROOT=""
+VERSION=""
+DEST_FW=""
+NEW_LIB=""
 
 if [[ "$PY_LIB" == *Python.framework* ]]; then
-  FRAMEWORK_ROOT="${PY_LIB%%/Versions/*}"
-  VERSION_DIR="${PY_LIB#"$FRAMEWORK_ROOT"/Versions/}"
-  VERSION="${VERSION_DIR%%/*}"
+  if [[ "$PY_LIB" == *"/Versions/"*"/Python" ]]; then
+    FRAMEWORK_ROOT="${PY_LIB%%/Versions/*}"
+    VERSION_DIR="${PY_LIB#"$FRAMEWORK_ROOT"/Versions/}"
+    VERSION="${VERSION_DIR%%/*}"
+  elif [[ -n "${BASE_PREFIX:-}" && "$BASE_PREFIX" == *Python.framework* ]]; then
+    FRAMEWORK_ROOT="${BASE_PREFIX%%/Versions/*}"
+    VERSION="${BASE_PREFIX##*/Versions/}"
+    VERSION="${VERSION%%/*}"
+    PY_LIB="$BASE_PREFIX/Python"
+    [[ -f "$PY_LIB" ]] || PY_LIB="$FRAMEWORK_ROOT/Versions/$VERSION/Python"
+  else
+    echo "relocate-bundle-python: cannot parse framework path: $PY_LIB" >&2
+    exit 1
+  fi
+elif [[ -z "${VERSION:-}" ]]; then
+  VERSION="$(discover_version)"
+fi
+
+echo "==> Relocating bundle/python (dylib: $PY_LIB)"
+
+if [[ "$PY_LIB" == *Python.framework* ]]; then
   if [[ ! -f "$PY_LIB" ]]; then
     echo "relocate-bundle-python: Python dylib not found at $PY_LIB" >&2
     exit 1
@@ -65,17 +219,9 @@ if [[ "$PY_LIB" == *Python.framework* ]]; then
   ln -sf "Versions/Current/Python" "$DEST_FW/Python"
   NEW_LIB="@loader_path/../Frameworks/Python.framework/Versions/${VERSION}/Python"
 
-  # Use the real interpreter — not the venv launcher that posix_spawns Python.app.
-  REAL_PY="$FRAMEWORK_ROOT/Versions/$VERSION/Resources/Python.app/Contents/MacOS/Python"
-  if [[ -x "$REAL_PY" ]]; then
-    cp -f "$REAL_PY" "$PY_BIN"
-    chmod +x "$PY_BIN"
-    echo "  installed real interpreter at bin/python3"
-  elif is_macho "$FRAMEWORK_ROOT/Versions/$VERSION/Python"; then
-    cp -f "$FRAMEWORK_ROOT/Versions/$VERSION/Python" "$PY_BIN"
-    chmod +x "$PY_BIN"
-    echo "  installed framework Python dylib as bin/python3"
-  fi
+  # Keep the venv copy at bin/python3 (honors pyvenv.cfg). Do not replace with
+  # Python.app/Contents/MacOS/Python — that binary ignores pyvenv.cfg and keeps
+  # sys.prefix at /Library/Frameworks/... on end-user machines.
 
   SRC_LIB="$FRAMEWORK_ROOT/Versions/$VERSION/lib"
   if [[ -d "$SRC_LIB" ]]; then
@@ -88,37 +234,50 @@ if [[ "$PY_LIB" == *Python.framework* ]]; then
     done
   fi
 
-  FW_STDLIB="$FRAMEWORK_ROOT/Versions/$VERSION/lib/python${VERSION}"
+  FW_PREFIX="$FRAMEWORK_ROOT/Versions/$VERSION"
+  FW_STDLIB="$FW_PREFIX/lib/python${VERSION}"
   VENV_STDLIB="$BUNDLE_PY/lib/python${VERSION}"
-  if [[ -d "$FW_STDLIB" && -d "$VENV_STDLIB" ]]; then
-    echo "  syncing stdlib modules from framework"
-    for item in "$FW_STDLIB"/*; do
-      base="$(basename "$item")"
-      [[ -e "$VENV_STDLIB/$base" ]] && continue
-      cp -R "$item" "$VENV_STDLIB/"
-    done
+  mkdir -p "$BUNDLE_PY/lib"
+  if copy_stdlib_zip "$FW_PREFIX"; then
+    sync_stdlib_native_only "$FW_STDLIB" "$VENV_STDLIB"
+  else
+    sync_stdlib_into_venv "$FW_STDLIB" "$VENV_STDLIB"
   fi
-  if [[ ! -f "$BUNDLE_PY/lib/python${VERSION}.zip" ]]; then
-    for z in \
-      "$FRAMEWORK_ROOT/Versions/$VERSION/lib/python${VERSION}.zip" \
-      "$FRAMEWORK_ROOT/Versions/$VERSION/lib/python${VERSION/./}.zip"; do
-      if [[ -f "$z" ]]; then
-        cp -f "$z" "$BUNDLE_PY/lib/python${VERSION}.zip"
-        echo "  copied $(basename "$z")"
-        break
-      fi
-    done
-  fi
+  PYVENV_HOME="$BUNDLE_PY/Frameworks/Python.framework/Versions/$VERSION"
 
 elif [[ "$PY_LIB" == *libpython*.dylib ]]; then
-  mkdir -p "$BUNDLE_PY/lib"
-  BASENAME="$(basename "$PY_LIB")"
-  if [[ ! -f "$PY_LIB" ]]; then
-    echo "relocate-bundle-python: dylib not found at $PY_LIB" >&2
+  BASE_PREFIX="${BASE_PREFIX:-$(discover_base_prefix)}"
+  if [[ "$BASE_PREFIX" == "$BUNDLE_PY"* ]]; then
+    echo "relocate-bundle-python: refusing to copy stdlib from inside the bundle" >&2
     exit 1
   fi
-  cp -f "$PY_LIB" "$BUNDLE_PY/lib/$BASENAME"
+  rm -rf "$BUNDLE_PY/base"
+  mkdir -p "$BUNDLE_PY/lib"
+  BASENAME="$(basename "$PY_LIB")"
+  HOST_LIBPY="$BASE_PREFIX/lib/$BASENAME"
+  dest_lib="$BUNDLE_PY/lib/$BASENAME"
+  if [[ -f "$HOST_LIBPY" ]]; then
+    if [[ "$(realpath "$HOST_LIBPY")" != "$(realpath "$dest_lib")" ]]; then
+      cp -f "$HOST_LIBPY" "$dest_lib"
+    fi
+  elif [[ -f "$PY_LIB" ]]; then
+    if [[ "$(realpath "$PY_LIB")" != "$(realpath "$dest_lib")" ]]; then
+      cp -f "$PY_LIB" "$dest_lib"
+    fi
+  else
+    echo "relocate-bundle-python: dylib not found at $PY_LIB or $HOST_LIBPY" >&2
+    exit 1
+  fi
   NEW_LIB="@loader_path/../lib/$BASENAME"
+  PYVENV_HOME="$BUNDLE_PY"
+  echo "  embedding portable stdlib from $BASE_PREFIX"
+  mkdir -p "$BUNDLE_PY/lib"
+  if copy_stdlib_zip "$BASE_PREFIX"; then
+    sync_stdlib_native_only "$BASE_PREFIX/lib/python${VERSION}" "$BUNDLE_PY/lib/python${VERSION}"
+  else
+    echo "  warn: no python${VERSION}.zip on host; syncing selective stdlib (pyenv builds are larger)"
+    sync_stdlib_into_venv "$BASE_PREFIX/lib/python${VERSION}" "$BUNDLE_PY/lib/python${VERSION}"
+  fi
 else
   echo "relocate-bundle-python: unsupported dependency: $PY_LIB" >&2
   exit 1
@@ -151,7 +310,31 @@ patch_tree() {
   done < <(find "$BUNDLE_PY" \( -name '*.so' -o -name '*.dylib' \) -type f -print0 2>/dev/null)
 }
 
-patch_tree "$PY_LIB" "$NEW_LIB"
+# Patch every absolute framework/libpython path that may still be referenced.
+OLD_LIBS=()
+if [[ -n "${FRAMEWORK_ROOT:-}" && -n "${VERSION:-}" ]]; then
+  OLD_LIBS+=(
+    "$FRAMEWORK_ROOT/Versions/$VERSION/Python"
+    "/Library/Frameworks/Python.framework/Versions/$VERSION/Python"
+  )
+elif [[ "$PY_LIB" == *libpython*.dylib ]]; then
+  OLD_LIBS+=("$PY_LIB")
+  if [[ -n "${BASE_PREFIX:-}" ]]; then
+    OLD_LIBS+=("$BASE_PREFIX/lib/$(basename "$PY_LIB")")
+  fi
+elif [[ "$PY_LIB" == /* ]]; then
+  OLD_LIBS+=("$PY_LIB")
+fi
+
+for old in "${OLD_LIBS[@]}"; do
+  [[ -n "$old" ]] || continue
+  patch_tree "$old" "$NEW_LIB"
+done
+
+# Also patch the discovered PY_LIB if it differs from OLD_LIBS entries.
+if [[ "$PY_LIB" == /* ]]; then
+  patch_tree "$PY_LIB" "$NEW_LIB"
+fi
 
 if [[ -n "${DEST_FW:-}" && -n "${VERSION}" && -n "${FRAMEWORK_ROOT}" ]]; then
   FW_LIB="$FRAMEWORK_ROOT/Versions/$VERSION/lib"
@@ -166,22 +349,20 @@ if [[ -n "${DEST_FW:-}" && -n "${VERSION}" && -n "${FRAMEWORK_ROOT}" ]]; then
   done
 fi
 
-if [[ -n "${VERSION}" ]]; then
-  cat >"$BUNDLE_PY/pyvenv.cfg" <<EOF
-home = ${BUNDLE_PY}
-include-system-site-packages = false
-version = ${VERSION}.0
-executable = ${BUNDLE_PY}/bin/python3
-command = ${BUNDLE_PY}/bin/python3 -m venv --copies
-EOF
-fi
+write_pyvenv_cfg "${VERSION:-3.12}"
 
 # Do not exec python3 here — install_name_tool breaks signatures until
 # sign-bundle-python.sh runs (see prepare-bundle.sh). otool-only checks below.
 
-if otool -L "$PY_BIN" | grep -q '/Library/Frameworks/Python.framework'; then
+if otool -L "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
   echo "relocate-bundle-python: still links to system Python.framework" >&2
   otool -L "$PY_BIN" | head -6 >&2
+  exit 1
+fi
+
+if strings "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
+  echo "relocate-bundle-python: bin/python3 still embeds /Library/Frameworks path strings" >&2
+  strings "$PY_BIN" 2>/dev/null | grep '/Library/Frameworks/Python.framework' | head -3 >&2
   exit 1
 fi
 

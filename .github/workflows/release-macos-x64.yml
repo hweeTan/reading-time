@@ -53,12 +53,30 @@ jobs:
       - name: Assert x86_64 runner
         run: test "$(uname -m)" = "x86_64"
 
-      - name: Build renderer, bundle, and x64 DMG
+      - name: Build renderer and Python bundle
         run: |
           set -euo pipefail
           pnpm run build:renderer
           pnpm run prepare-bundle
-          pnpm exec electron-builder --mac dmg --x64 --publish never -c.mac.hardenedRuntime=false
+
+      - name: Assert bundled Python prefix is self-contained
+        run: |
+          set -euo pipefail
+          PY="../bundle/python/bin/python3"
+          test -x "$PY"
+          echo "pyvenv.cfg:"
+          cat ../bundle/python/pyvenv.cfg
+          "$PY" -c "import sys; print('prefix', sys.prefix); print('base_prefix', sys.base_prefix); print('path', sys.path[:4])"
+          "$PY" -c "
+          import sys
+          assert '/Library/Frameworks' not in sys.prefix, sys.prefix
+          assert '/Library/Frameworks' not in sys.base_prefix, sys.base_prefix
+          import encodings
+          print('encodings ok', encodings.__file__)
+          "
+
+      - name: Build x64 DMG
+        run: pnpm exec electron-builder --mac dmg --x64 --publish never -c.mac.hardenedRuntime=false
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4

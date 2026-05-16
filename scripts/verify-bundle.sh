@@ -35,11 +35,49 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     echo "verify-bundle: python still links to system Python.framework — run scripts/relocate-bundle-python.sh" >&2
     exit 1
   fi
+  if strings "$PY" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
+    echo "verify-bundle: bin/python3 embeds /Library/Frameworks path strings — run scripts/relocate-bundle-python.sh" >&2
+    exit 1
+  fi
   if ! codesign --verify "$PY" 2>/dev/null; then
     echo "verify-bundle: python3 signature invalid — run scripts/sign-bundle-python.sh" >&2
     exit 1
   fi
   echo "  ok: codesign verify python3"
+fi
+
+if [[ -f "$BUNDLE_PY/pyvenv.cfg" ]]; then
+  if grep -q '/Library/Frameworks/Python.framework' "$BUNDLE_PY/pyvenv.cfg"; then
+    echo "verify-bundle: pyvenv.cfg still references system Python.framework" >&2
+    cat "$BUNDLE_PY/pyvenv.cfg" >&2
+    exit 1
+  fi
+  echo "  ok: pyvenv.cfg not tied to system framework"
+fi
+
+echo "==> Prefix / stdlib self-containment"
+if ! "$PY" -c "
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ['BUNDLE_PY']).resolve()
+for name in ('prefix', 'base_prefix', 'exec_prefix', 'base_exec_prefix'):
+    p = pathlib.Path(getattr(sys, name)).resolve()
+    if '/Library/Frameworks/Python.framework' in str(p):
+        raise SystemExit(f'{name}={p} still points at system Python.framework')
+    if not str(p).startswith(str(root)):
+        raise SystemExit(f'{name}={p} is not under bundle root {root}')
+
+import encodings
+
+enc = pathlib.Path(encodings.__file__).resolve()
+if not str(enc).startswith(str(root)):
+    raise SystemExit(f'encodings at {enc} is not under bundle root {root}')
+print(f'  ok: prefix={sys.prefix}')
+print(f'  ok: encodings at {enc}')
+"; then
+  exit 1
 fi
 
 if [[ ! -d "$BUNDLE_TTS" ]]; then
