@@ -55,6 +55,24 @@ done
 
 echo "==> Verifying signature and interpreter"
 codesign --verify --verbose=2 "$BUNDLE_PY/bin/python3"
-"$BUNDLE_PY/bin/python3" -c "import encodings, sys; print('  ok:', sys.version.split()[0])"
+export BUNDLE_PY
+"$BUNDLE_PY/bin/python3" -c "
+import encodings
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ['BUNDLE_PY']).resolve()
+if '/Library/Frameworks/Python.framework' in sys.prefix:
+    raise SystemExit(f'prefix still on system framework: {sys.prefix!r}')
+for name in ('prefix', 'base_prefix'):
+    p = pathlib.Path(getattr(sys, name)).resolve()
+    if not str(p).startswith(str(root)):
+        raise SystemExit(f'{name}={p} is not under bundle {root}')
+enc = pathlib.Path(encodings.__file__).resolve()
+if not str(enc).startswith(str(root)):
+    raise SystemExit(f'encodings not in bundle: {enc}')
+print('  ok:', sys.version.split()[0], 'prefix', sys.prefix)
+"
 
 echo "==> sign-bundle-python OK"

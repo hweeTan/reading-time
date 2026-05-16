@@ -106,6 +106,33 @@ sync_stdlib_native_only() {
   done
 }
 
+interpreter_references_python_app() {
+  is_macho "$PY_BIN" || return 1
+  strings "$PY_BIN" 2>/dev/null | grep -q 'Python.app/Contents/MacOS/Python'
+}
+
+# venv --copies on python.org macOS is a stub that posix_spawns Python.app, which we
+# do not ship (and trim removes). Use the framework CLI binary or embedded dylib.
+install_framework_interpreter() {
+  local root="$FRAMEWORK_ROOT/Versions/$VERSION"
+  for candidate in "$root/bin/python${VERSION}" "$root/bin/python3"; do
+    if [[ -x "$candidate" ]]; then
+      cp -f "$candidate" "$PY_BIN"
+      chmod +x "$PY_BIN"
+      echo "  installed $(basename "$candidate") as bin/python3"
+      return 0
+    fi
+  done
+  if [[ -f "${DEST_FW}/Versions/${VERSION}/Python" ]]; then
+    cp -f "${DEST_FW}/Versions/${VERSION}/Python" "$PY_BIN"
+    chmod +x "$PY_BIN"
+    echo "  installed embedded Python dylib as bin/python3"
+    return 0
+  fi
+  echo "relocate-bundle-python: no framework interpreter under $root/bin" >&2
+  return 1
+}
+
 # First Python.framework / libpython dependency from otool (may be absolute or @-relative).
 find_otool_py_lib() {
   local dep
@@ -219,10 +246,6 @@ if [[ "$PY_LIB" == *Python.framework* ]]; then
   ln -sf "Versions/Current/Python" "$DEST_FW/Python"
   NEW_LIB="@loader_path/../Frameworks/Python.framework/Versions/${VERSION}/Python"
 
-  # Keep the venv copy at bin/python3 (honors pyvenv.cfg). Do not replace with
-  # Python.app/Contents/MacOS/Python — that binary ignores pyvenv.cfg and keeps
-  # sys.prefix at /Library/Frameworks/... on end-user machines.
-
   SRC_LIB="$FRAMEWORK_ROOT/Versions/$VERSION/lib"
   if [[ -d "$SRC_LIB" ]]; then
     mkdir -p "$DEST_FW/Versions/$VERSION/lib"
@@ -244,6 +267,7 @@ if [[ "$PY_LIB" == *Python.framework* ]]; then
     sync_stdlib_into_venv "$FW_STDLIB" "$VENV_STDLIB"
   fi
   PYVENV_HOME="$BUNDLE_PY/Frameworks/Python.framework/Versions/$VERSION"
+  install_framework_interpreter
 
 elif [[ "$PY_LIB" == *libpython*.dylib ]]; then
   BASE_PREFIX="${BASE_PREFIX:-$(discover_base_prefix)}"
@@ -363,6 +387,12 @@ fi
 if strings "$PY_BIN" 2>/dev/null | grep -q '/Library/Frameworks/Python.framework'; then
   echo "relocate-bundle-python: bin/python3 still embeds /Library/Frameworks path strings" >&2
   strings "$PY_BIN" 2>/dev/null | grep '/Library/Frameworks/Python.framework' | head -3 >&2
+  exit 1
+fi
+
+if [[ -n "${DEST_FW:-}" ]] && interpreter_references_python_app; then
+  echo "relocate-bundle-python: bin/python3 still posix_spawns Python.app (not bundled)" >&2
+  strings "$PY_BIN" 2>/dev/null | grep 'Python.app' | head -3 >&2
   exit 1
 fi
 
