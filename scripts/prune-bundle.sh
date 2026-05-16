@@ -13,6 +13,8 @@ if [[ ! -x "$PY" ]]; then
   exit 1
 fi
 
+bundle_export_python_env "$BUNDLE_PY"
+
 ORPHANS=(
   gradio
   gradio_client

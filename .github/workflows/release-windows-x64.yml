@@ -66,6 +66,7 @@ jobs:
           export BUNDLE_PY="$ROOT/bundle/python"
           # shellcheck source=scripts/bundle-venv.sh
           . "$ROOT/scripts/bundle-venv.sh"
+          bundle_export_python_env "$BUNDLE_PY"
           PY="$(bundle_python_exe "$BUNDLE_PY")"
           test -x "$PY"
           test ! -f "$BUNDLE_PY/pyvenv.cfg"

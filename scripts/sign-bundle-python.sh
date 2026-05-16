@@ -3,7 +3,10 @@
 # Without this, dyld reports: code signature invalid ... Python.framework/.../Python
 set -euo pipefail
 
-BUNDLE_PY="${1:-$(cd "$(dirname "$0")/.." && pwd)/bundle/python}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/bundle-venv.sh
+. "$ROOT/scripts/bundle-venv.sh"
+BUNDLE_PY="${1:-$ROOT/bundle/python}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "==> sign-bundle-python: skipped (not macOS)"
@@ -55,7 +58,7 @@ done
 
 echo "==> Verifying signature and interpreter"
 codesign --verify --verbose=2 "$BUNDLE_PY/bin/python3"
-export BUNDLE_PY
+bundle_export_python_env "$BUNDLE_PY"
 "$BUNDLE_PY/bin/python3" -c "
 import encodings
 import os

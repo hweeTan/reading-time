@@ -29,9 +29,18 @@ function devBundlePythonHome() {
   return path.join(__dirname, '..', 'bundle', 'python')
 }
 
+function isWindowsStandaloneBundle(pyHome) {
+  return (
+    process.platform === 'win32' &&
+    !fs.existsSync(path.join(pyHome, 'pyvenv.cfg'))
+  )
+}
+
 function devBundlePythonExecutable() {
   const home = devBundlePythonHome()
   if (process.platform === 'win32') {
+    const rootPy = path.join(home, 'python.exe')
+    if (isWindowsStandaloneBundle(home) && fs.existsSync(rootPy)) return rootPy
     return path.join(home, 'Scripts', 'python.exe')
   }
   return path.join(home, 'bin', 'python3')
@@ -40,7 +49,10 @@ function devBundlePythonExecutable() {
 function packagedPythonCandidates() {
   const base = path.join(process.resourcesPath, 'python')
   if (process.platform === 'win32') {
-    return [path.join(base, 'Scripts', 'python.exe')]
+    return [
+      path.join(base, 'python.exe'),
+      path.join(base, 'Scripts', 'python.exe'),
+    ]
   }
   // Prefer python3; some venvs only expose `python` as the real file.
   return [path.join(base, 'bin', 'python3'), path.join(base, 'bin', 'python')]
@@ -63,6 +75,16 @@ function getModelsHome() {
   return path.join(app.getPath('userData'), 'models')
 }
 
+function darwinEmbeddedFrameworkHome(pyHome) {
+  const versionsDir = path.join(pyHome, 'Frameworks', 'Python.framework', 'Versions')
+  if (!fs.existsSync(versionsDir)) return null
+  for (const name of fs.readdirSync(versionsDir)) {
+    const versionHome = path.join(versionsDir, name)
+    if (fs.existsSync(path.join(versionHome, 'lib'))) return versionHome
+  }
+  return null
+}
+
 function workerEnv() {
   const env = {
     ...process.env,
@@ -75,19 +97,28 @@ function workerEnv() {
     ? path.join(process.resourcesPath, 'python')
     : devBundlePythonHome()
   if (fs.existsSync(pyHome)) {
-    env.VIRTUAL_ENV = pyHome
     const binDir =
       process.platform === 'win32'
         ? path.join(pyHome, 'Scripts')
         : path.join(pyHome, 'bin')
-    env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`
-    // Do not set PYTHONHOME with a venv — it breaks stdlib discovery (encodings).
-    delete env.PYTHONHOME
-    if (isPackagedApp() && process.platform === 'darwin') {
+    if (isWindowsStandaloneBundle(pyHome)) {
+      env.PYTHONHOME = pyHome
+      env.PATH = [pyHome, binDir, env.PATH || ''].filter(Boolean).join(path.delimiter)
+      delete env.VIRTUAL_ENV
+    } else {
+      env.VIRTUAL_ENV = pyHome
+      env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`
+      delete env.PYTHONHOME
+    }
+    if (process.platform === 'darwin') {
       const fwDir = path.join(pyHome, 'Frameworks')
       if (fs.existsSync(fwDir)) {
         const cur = env.DYLD_FRAMEWORK_PATH || ''
         env.DYLD_FRAMEWORK_PATH = cur ? `${fwDir}${path.delimiter}${cur}` : fwDir
+      }
+      const fwVersion = darwinEmbeddedFrameworkHome(pyHome)
+      if (fwVersion) {
+        env.PYTHONHOME = fwVersion
       }
     }
   }

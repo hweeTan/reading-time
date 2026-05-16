@@ -2,7 +2,10 @@
 # Shrink bundle/python after relocate (remove duplicate framework trees, strip, etc.).
 set -euo pipefail
 
-BUNDLE_PY="${1:-$(cd "$(dirname "$0")/.." && pwd)/bundle/python}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/bundle-venv.sh
+. "$ROOT/scripts/bundle-venv.sh"
+BUNDLE_PY="${1:-$ROOT/bundle/python}"
 
 if [[ ! -d "$BUNDLE_PY" ]]; then
   echo "trim-bundle-python: missing $BUNDLE_PY" >&2
@@ -33,6 +36,7 @@ if [[ -d "$BUNDLE_PY/Frameworks/Python.framework" ]]; then
 fi
 
 # Stdlib modules not needed by the TTS worker.
+bundle_export_python_env "$BUNDLE_PY"
 PY_VER="$("$BUNDLE_PY/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "3.12")"
 for STDLIB in "$BUNDLE_PY/lib/python${PY_VER}"; do
   if [[ -d "$STDLIB" ]]; then

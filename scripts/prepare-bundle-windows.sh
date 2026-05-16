@@ -21,20 +21,21 @@ shopt -s dotglob 2>/dev/null || true
 cp -R "$BASE_PREFIX"/* "$BUNDLE_PY/"
 shopt -u dotglob 2>/dev/null || true
 
-# Shipped layout expects Scripts/python.exe (see electron/main.cjs).
-PY="$(bundle_python_exe "$BUNDLE_PY")"
-if [[ ! -x "$PY" ]]; then
-  if [[ ! -x "$BUNDLE_PY/python.exe" ]]; then
-    echo "prepare-bundle-windows: no python.exe under $BUNDLE_PY" >&2
-    exit 1
-  fi
-  mkdir -p "$BUNDLE_PY/Scripts"
-  cp "$BUNDLE_PY/python.exe" "$BUNDLE_PY/Scripts/python.exe"
-  PY="$BUNDLE_PY/Scripts/python.exe"
-fi
-
 # Standalone copy must not keep a venv config pointing at the build host.
 rm -f "$BUNDLE_PY/pyvenv.cfg"
+
+bundle_export_python_env "$BUNDLE_PY"
+PY="$(bundle_python_exe "$BUNDLE_PY")"
+if [[ ! -x "$PY" ]]; then
+  echo "prepare-bundle-windows: no python.exe under $BUNDLE_PY" >&2
+  exit 1
+fi
+
+# Optional launcher for tools that expect Scripts/python.exe (Electron tries root first).
+if [[ ! -x "$BUNDLE_PY/Scripts/python.exe" ]]; then
+  mkdir -p "$BUNDLE_PY/Scripts"
+  cp "$BUNDLE_PY/python.exe" "$BUNDLE_PY/Scripts/python.exe"
+fi
 
 "$PY" -m pip install -U pip wheel
 

@@ -16,7 +16,7 @@ if [[ ! -x "$PY" ]]; then
 fi
 
 # Catch broken or host-absolute symlinks (would work on the build machine only).
-export BUNDLE_PY
+bundle_export_python_env "$BUNDLE_PY"
 if ! "$PY" -c "
 import os, sys
 root = os.path.realpath(os.environ['BUNDLE_PY'])
